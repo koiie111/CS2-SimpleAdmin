@@ -118,7 +118,9 @@ jobs:
         run: dotnet test tests/CS2-SimpleAdmin.Tests/CS2-SimpleAdmin.Tests.csproj -c Release
 
   publish:
-    needs: build
+    # Release gate: an automatic release is published only when the build AND both test jobs (SQLite; required
+    # MySQL/MariaDB) passed. Changing this is a configuration decision for review, not a release.
+    needs: [build, tests, tests-mysql]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions: write-all
