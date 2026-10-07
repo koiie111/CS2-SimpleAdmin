@@ -262,7 +262,7 @@ public class CS2_SimpleAdminConfig : BasePluginConfig
     public bool EnableUpdateCheck { get; set; } = true;
 
     [JsonPropertyName("Timezone")]
-    public string Timezone { get; set; } = "UTC";
+    public string Timezone { get; set; } = "Europe/Moscow";
 
     [JsonPropertyName("WarnThreshold")]
     public Dictionary<int, string> WarnThreshold { get; set; } = new()
