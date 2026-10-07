@@ -151,27 +151,45 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
     /// Tuple containing total mutes, total gags, and total silences respectively.
     /// Returns zeros if no data or on error.
     /// </returns>
+    /// <remarks>
+    /// Uses the stats query (counts per type). It used to run the unmute lookup query, which needs @pattern and
+    /// @muteType, so it always threw and silently returned zeros. Errors now propagate to the caller.
+    /// </remarks>
     public async Task<(int TotalMutes, int TotalGags, int TotalSilences)> GetPlayerMutes(PlayerInfo playerInfo)
     {
         if (databaseProvider == null) return (0,0,0);
 
-        try
+        await using var connection = await databaseProvider.CreateConnectionAsync();
+        var sql = databaseProvider.GetMuteStatsQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+        var result = await connection.QuerySingleAsync<Models.MuteStats>(sql, new
         {
-            await using var connection = await databaseProvider.CreateConnectionAsync();
+            PlayerSteamID = playerInfo.SteamId.SteamId64,
+            CS2_SimpleAdmin.ServerId
+        });
 
-            var sql = databaseProvider.GetRetrieveMutesQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
-            var result = await connection.QuerySingleAsync<(int TotalMutes, int TotalGags, int TotalSilences)>(sql, new
-            {
-                PlayerSteamID = playerInfo.SteamId.SteamId64,
-                CS2_SimpleAdmin.ServerId
-            });
+        return ((int)result.TotalMutes, (int)result.TotalGags, (int)result.TotalSilences);
+    }
 
-            return result;
-        }
-        catch (Exception)
-        {
-            return (0, 0, 0);
-        }
+    /// <summary>Historic totals (bans, mutes, gags, silences, warns) of a player in one query.</summary>
+    internal async Task<Models.PlayerPenaltyStats> GetPlayerPenaltyStatsAsync(ulong steamId, bool multiServer, int? serverId,
+        CancellationToken ct)
+    {
+        if (databaseProvider == null) return new Models.PlayerPenaltyStats();
+        await using var connection = await databaseProvider.CreateConnectionAsync(ct);
+        return await connection.QuerySingleAsync<Models.PlayerPenaltyStats>(new CommandDefinition(
+            databaseProvider.GetPlayerPenaltyStatsQuery(multiServer),
+            new { PlayerSteamID = steamId, serverid = serverId }, cancellationToken: ct));
+    }
+
+    /// <summary>Active gags/mutes/silences of a player (typed; same rules as <see cref="IsPlayerMuted"/>).</summary>
+    internal async Task<List<Models.ActiveMuteRow>> GetActiveMutesAsync(ulong steamId, bool multiServer, int timeMode,
+        int? serverId, DateTime now, CancellationToken ct)
+    {
+        if (databaseProvider == null) return [];
+        await using var connection = await databaseProvider.CreateConnectionAsync(ct);
+        var sql = databaseProvider.GetIsMutedQuery(multiServer, timeMode);
+        return (await connection.QueryAsync<Models.ActiveMuteRow>(new CommandDefinition(sql,
+            new { PlayerSteamID = steamId, CurrentTime = now, serverid = serverId }, cancellationToken: ct))).AsList();
     }
     
     /// <summary>
@@ -179,45 +197,43 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
     /// </summary>
     /// <param name="players">List of tuples containing player SteamID, optional UserID, and slot index.</param>
     /// <returns>Task representing the asynchronous operation.</returns>
-    public async Task CheckOnlineModeMutes(List<(ulong SteamID, int? UserId, int Slot)> players)
+    /// <summary>
+    /// TimeMode 0: credits online minutes to the active timed mutes of online players and returns the mutes whose
+    /// online time is now used up. Set-based: one UPDATE and one SELECT per batch of up to
+    /// <see cref="OnlineBatchSize"/> SteamIDs (players grouped by the minutes credited), instead of one UPDATE and
+    /// one SELECT per player. Runs on a DB worker; the caller applies the result on the game thread.
+    /// </summary>
+    internal const int OnlineBatchSize = 64;
+
+    internal async Task<List<Models.ExpiredOnlineMuteRow>> CheckOnlineModeMutesAsync(
+        IReadOnlyList<(ulong SteamId, int Minutes)> credits, bool multiServer, int? serverId, CancellationToken ct)
     {
-        if (databaseProvider == null) return;
+        var expired = new List<Models.ExpiredOnlineMuteRow>();
+        if (databaseProvider == null || credits.Count == 0) return expired;
 
-        try
+        await using var connection = await databaseProvider.CreateConnectionAsync(ct);
+        var update = databaseProvider.GetUpdateMutePassedBatchQuery(multiServer);
+        foreach (var group in credits.Where(c => c.Minutes > 0).GroupBy(c => c.Minutes))
         {
-            const int batchSize = 20;
-            await using var connection = await databaseProvider.CreateConnectionAsync();
-
-            var sql = databaseProvider.GetUpdateMutePassedQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
-
-            for (var i = 0; i < players.Count; i += batchSize)
+            var ids = group.Select(c => c.SteamId).Distinct().ToList();
+            for (var i = 0; i < ids.Count; i += OnlineBatchSize)
             {
-                var batch = players.Skip(i).Take(batchSize);
-                var parametersList = new List<object>();
-
-                foreach (var (steamId, _, _) in batch)
-                {
-                    parametersList.Add(new { PlayerSteamID = steamId, serverid = CS2_SimpleAdmin.ServerId });
-                }
-
-                await connection.ExecuteAsync(sql, parametersList);
-            }
-
-            sql = databaseProvider.GetCheckExpiredMutesQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
-
-            foreach (var (steamId, _, slot) in players)
-            {
-                var muteRecords = await connection.QueryAsync(sql, new { PlayerSteamID = steamId, serverid = CS2_SimpleAdmin.ServerId });
-
-                foreach (var muteRecord in muteRecords)
-                {
-                    DateTime endDateTime = muteRecord.ends;
-                    PlayerPenaltyManager.RemovePenaltiesByDateTime(slot, endDateTime);
-                }
-
+                var batch = ids.GetRange(i, Math.Min(OnlineBatchSize, ids.Count - i));
+                await connection.ExecuteAsync(new CommandDefinition(update,
+                    new { ids = batch, minutes = group.Key, serverid = serverId }, cancellationToken: ct));
             }
         }
-        catch { }
+
+        var select = databaseProvider.GetExpiredOnlineMutesBatchQuery(multiServer);
+        var all = credits.Select(c => c.SteamId).Distinct().ToList();
+        for (var i = 0; i < all.Count; i += OnlineBatchSize)
+        {
+            var batch = all.GetRange(i, Math.Min(OnlineBatchSize, all.Count - i));
+            expired.AddRange(await connection.QueryAsync<Models.ExpiredOnlineMuteRow>(new CommandDefinition(select,
+                new { ids = batch, serverid = serverId }, cancellationToken: ct)));
+        }
+
+        return expired;
     }
 
     /// <summary>
@@ -292,9 +308,9 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             var sql = databaseProvider.GetExpireMutesQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode, CS2_SimpleAdmin.Instance.Config.OtherSettings.TimeMode);
             await connection.ExecuteAsync(sql, new { CurrentTime = Time.ActualDateTime(), serverid = CS2_SimpleAdmin.ServerId });
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            CS2_SimpleAdmin._logger?.LogCritical("Unable to remove expired mutes");
+            Infrastructure.RateLimitedLog.Error("expire.mutes", ex, "Unable to remove expired mutes");
         }
     }
 }

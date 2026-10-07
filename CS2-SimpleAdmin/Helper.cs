@@ -712,18 +712,8 @@ internal static class Helper
             embed.AddField(fieldNames[i], fieldValues[i], inlineFlags[i]);
         }
 
-        Task.Run(async () =>
-        {
-            try
-            {
-                await new DiscordManager(webhookUrl).SendEmbedAsync(embed);
-            }
-            catch (Exception ex)
-            {
-                // Log or handle the exception
-                CS2_SimpleAdmin._logger?.LogError("Unable to send discord webhook: {exception}", ex.Message);
-            }
-        });
+        // Built from game data above (game thread); serialised and sent by the bounded HTTP queue
+        DiscordSender.EnqueueEmbed(webhookUrl, embed);
     }
     
     public static void SendDiscordPenaltyMessage(CCSPlayerController? caller, string steamId, string reason, int duration, PenaltyType penalty, IStringLocalizer? localizer)
@@ -806,17 +796,7 @@ internal static class Helper
             embed.AddField(fieldNames[i], fieldValues[i], inlineFlags[i]);
         }
 
-        Task.Run(async () =>
-        {
-            try
-            {
-                await new DiscordManager(webhookUrl).SendEmbedAsync(embed);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex);
-            }
-        });
+        DiscordSender.EnqueueEmbed(webhookUrl, embed);
     }
     
     private static string GenerateMessageDiscord(string message)
@@ -1168,30 +1148,51 @@ public class SchemaString<TSchemaClass>(TSchemaClass instance, string member)
 
 public static class Time
 {
-    public static DateTime ActualDateTime()
-    {
-        if (CS2_SimpleAdmin.Instance.Config.DatabaseConfig.DatabaseType.ToLower().Equals("sqlite"))
-            return DateTime.UtcNow;
-        
-        string timezoneId = CS2_SimpleAdmin.Instance.Config.Timezone;
-        DateTime utcNow = DateTime.UtcNow;
+    private sealed record Resolved(string DatabaseType, string TimezoneId, TimeZoneInfo? Zone);
 
+    private static Resolved? _resolved;
+
+    /// <summary>
+    /// Resolves the configured timezone once per config. SQLite keeps using UTC and MySQL uses <c>Timezone</c>,
+    /// exactly as before; only the lookup and the "not found" warning no longer happen on every call.
+    /// </summary>
+    internal static void Configure(string databaseType, string timezoneId)
+    {
+        if (databaseType.Equals("sqlite", StringComparison.OrdinalIgnoreCase))
+        {
+            _resolved = new Resolved(databaseType, timezoneId, null);
+            return;
+        }
+
+        TimeZoneInfo zone;
         try
         {
-            TimeZoneInfo timezone = TimeZoneInfo.FindSystemTimeZoneById(timezoneId);
-            DateTime userTime = TimeZoneInfo.ConvertTimeFromUtc(utcNow, timezone);
-            return userTime;
+            zone = TimeZoneInfo.FindSystemTimeZoneById(timezoneId);
         }
-        catch (TimeZoneNotFoundException)
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
         {
-            CS2_SimpleAdmin._logger?.LogWarning($"Time zone '{timezoneId}' not found. Returning UTC time.");
-            return utcNow;
+            CS2_SimpleAdmin._logger?.LogWarning($"Time zone '{timezoneId}' not found or invalid. Using UTC time.");
+            zone = TimeZoneInfo.Utc;
         }
-        catch (InvalidTimeZoneException)
+
+        _resolved = new Resolved(databaseType, timezoneId, zone);
+    }
+
+    public static DateTime ActualDateTime()
+    {
+        var config = CS2_SimpleAdmin.Instance.Config;
+        var resolved = _resolved;
+        // string.Equals short-circuits on the same reference, so the steady state costs two pointer compares
+        if (resolved == null ||
+            !string.Equals(resolved.DatabaseType, config.DatabaseConfig.DatabaseType, StringComparison.Ordinal) ||
+            !string.Equals(resolved.TimezoneId, config.Timezone, StringComparison.Ordinal))
         {
-            CS2_SimpleAdmin._logger?.LogWarning($"Time zone '{timezoneId}' is invalid. Returning UTC time.");
-            return utcNow;
+            Configure(config.DatabaseConfig.DatabaseType, config.Timezone);
+            resolved = _resolved!;
         }
+
+        var utcNow = DateTime.UtcNow;
+        return resolved.Zone == null ? utcNow : TimeZoneInfo.ConvertTimeFromUtc(utcNow, resolved.Zone);
     }
 }
 

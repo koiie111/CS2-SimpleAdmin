@@ -84,7 +84,8 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
             var sql = databaseProvider.GetGroupsQuery();
-            var groupData = connection.Query(sql, new { serverid = CS2_SimpleAdmin.ServerId }).ToList();
+            // Async: this runs on a DB worker, a synchronous Query would block it for the whole round trip
+            var groupData = (await connection.QueryAsync(sql, new { serverid = CS2_SimpleAdmin.ServerId })).ToList();
             if (groupData.Count == 0)
             {
                 return [];
@@ -119,7 +120,8 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
     /// Creates a JSON file containing groups data asynchronously.
     /// </summary>
     [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
-    public async Task CreateGroupsJsonFile()
+    /// <returns>True when at least one group was written (the caller then loads the file into CSS).</returns>
+    public async Task<bool> CreateGroupsJsonFile()
     {
         var groupsData = await GetAllGroupsData();
         var jsonData = new Dictionary<string, object>();
@@ -143,14 +145,31 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
 
         var json = JsonSerializer.Serialize(jsonData, options);
         var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "groups.json");
-        await File.WriteAllTextAsync(filePath, json);
+        await WriteAtomicallyAsync(filePath, json);
+        return groupsData.Count > 0;
+    }
+
+    /// <summary>
+    /// Writes to a temp file and renames it over the target, so CSS (reading on the game thread) never sees a
+    /// half-written file. The content length decides whether there is anything to load, no read-back needed.
+    /// </summary>
+    private static async Task WriteAtomicallyAsync(string path, string content)
+    {
+        var temp = path + ".tmp";
+        await File.WriteAllTextAsync(temp, content);
+        File.Move(temp, path, true);
     }
 
     /// <summary>
     /// Creates a JSON file containing admins data asynchronously.
     /// </summary>
     [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
-    public async Task<List<(SteamID steamId, DateTime? ends, List<string> flags)>> CreateAdminsJsonFile()
+    public async Task<List<(SteamID steamId, DateTime? ends, List<string> flags)>> CreateAdminsJsonFile() =>
+        (await CreateAdminsJsonFileWithStatus()).Admins;
+
+    /// <returns>Admins for the in-memory cache, and whether the written file contains any admin.</returns>
+    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
+    public async Task<(List<(SteamID steamId, DateTime? ends, List<string> flags)> Admins, bool Written)> CreateAdminsJsonFileWithStatus()
     {
         List<(ulong identity, string name, List<string> flags, int immunity, DateTime? ends)> allPlayers = await GetAllPlayersFlags();
         var validPlayers = allPlayers
@@ -200,11 +219,12 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
 			PropertyNamingPolicy = JsonNamingPolicy.CamelCase
 		};
 
-		var json = JsonSerializer.Serialize(jsonData, options);
+        var json = JsonSerializer.Serialize(jsonData, options);
         var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "admins.json");
-        await File.WriteAllTextAsync(filePath, json);
+        await WriteAtomicallyAsync(filePath, json);
 
-        return newCache;
+        // The old code loaded admins.json whenever the file was non-empty ("{}" included); keep that behaviour
+        return (newCache, json.Length > 0);
     }
 
     /// <summary>
@@ -303,10 +323,7 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
                 });
             }
 
-            await Server.NextWorldUpdateAsync(() =>
-            {
-                CS2_SimpleAdmin.Instance.ReloadAdmins(null);
-            });
+            _ = CS2_SimpleAdmin.Instance.ReloadAdminsAsync();
         }
         catch (Exception ex)
         {
@@ -350,10 +367,7 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
 
             var insertGroupServer = databaseProvider.GetAddGroupServerQuery();
             await connection.ExecuteAsync(insertGroupServer, new { groupId, server_id = globalGroup ? null : CS2_SimpleAdmin.ServerId });
-            await Server.NextWorldUpdateAsync(() =>
-            {
-                CS2_SimpleAdmin.Instance.ReloadAdmins(null);
-            });
+            _ = CS2_SimpleAdmin.Instance.ReloadAdminsAsync();
         }
         catch (Exception ex)
         {
@@ -397,9 +411,9 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
             var sql = databaseProvider.GetDeleteOldAdminsQuery();
             await connection.ExecuteAsync(sql, new { CurrentTime = Time.ActualDateTime() });
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            CS2_SimpleAdmin._logger?.LogCritical("Unable to remove expired admins");
+            Infrastructure.RateLimitedLog.Error("expire.admins", ex, "Unable to remove expired admins");
         }
     }
 }

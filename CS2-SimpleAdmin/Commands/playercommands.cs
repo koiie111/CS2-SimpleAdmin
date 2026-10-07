@@ -354,7 +354,7 @@ public partial class CS2_SimpleAdmin
                 RenamedPlayers.Remove(steamId);
             }
 
-            Task.Run(() => PlayerManager.SaveRenamedPlayer(steamId, newName));
+            TryQueuePenaltyWork(caller, null, "rename-save", _ => PlayerManager.SaveRenamedPlayer(steamId, newName));
         });
     }
 

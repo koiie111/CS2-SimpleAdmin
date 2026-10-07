@@ -26,9 +26,10 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
         DateTime now = Time.ActualDateTime();
         DateTime futureTime = now.AddMinutes(time);
 
-        await using var connection = await databaseProvider.CreateConnectionAsync();
         try
         {
+            // Inside the try: a failed connect is a failed ban (null), reported to the admin, not an unobserved exception
+            await using var connection = await databaseProvider.CreateConnectionAsync();
             var sql = databaseProvider.GetAddBanQuery();
             var banId = await connection.ExecuteScalarAsync<int?>(sql, new
             {
@@ -44,6 +45,8 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
                 serverid = CS2_SimpleAdmin.ServerId
             });
 
+            if (banId != null)
+                _lastBans[banId.Value] = (now, futureTime, CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 1 ? player.IpAddress : null);
             return banId;
         }
         catch(Exception ex)
@@ -51,6 +54,25 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
             CS2_SimpleAdmin._logger?.LogError(ex, ex.Message);
             return null;
         }
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, (DateTime Created, DateTime Ends, string? Ip)> _lastBans = new();
+
+    /// <summary>Cache record for a ban just written by <see cref="BanPlayer"/> (same values as the inserted row).</summary>
+    internal Models.BanRecord LastBanRecord(int banId, PlayerInfo player, int time)
+    {
+        _lastBans.TryRemove(banId, out var written);
+        return new Models.BanRecord
+        {
+            Id = banId,
+            PlayerName = player.Name,
+            PlayerSteamId = player.SteamId.SteamId64,
+            PlayerIp = written.Ip,
+            Created = written.Created,
+            Ends = written.Ends,
+            Duration = time,
+            Status = "ACTIVE"
+        };
     }
 
     /// <summary>
@@ -126,7 +148,10 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
                 serverid = CS2_SimpleAdmin.ServerId
             });
         }
-        catch { }
+        catch (Exception ex)
+        {
+            CS2_SimpleAdmin._logger?.LogError("Unable to add IP ban for {Ip}: {Error}", playerIp, ex.Message);
+        }
     }
 
 //     public async Task<bool> IsPlayerBanned(PlayerInfo player)
@@ -342,7 +367,8 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
         }
 
         // Apply immediately; the periodic cache refresh would otherwise keep rejecting the player for up to a minute
-        CS2_SimpleAdmin.Instance.CacheManager?.SetBanStatus(bansList.Select(b => (int)b.id), Models.BanStatus.UNBANNED);
+        if (CS2_SimpleAdmin.Instance.CacheManager is { } cache)
+            await cache.SetBanStatusAsync(bansList.Select(b => (int)b.id).ToList(), Models.BanStatus.UNBANNED);
 
         // css_ban also issues a native banid when UnlockedCommands is on; clear it so the engine stops
         // rejecting the player. Done here, after the rows are updated, and for whichever pattern matched them.
@@ -357,7 +383,7 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
                 .ToList();
 
             if (steamIds.Count > 0)
-                await Server.NextWorldUpdateAsync(() =>
+                await Infrastructure.Runtime.OnGameThread(() =>
                 {
                     foreach (var steamId in steamIds)
                         Server.ExecuteCommand($"removeid {new SteamID(steamId).SteamId3}");
@@ -463,9 +489,9 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
                 await connection.ExecuteAsync(sql, new { ipBansTime });
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            CS2_SimpleAdmin._logger?.LogCritical("Unable to remove expired bans");
+            Infrastructure.RateLimitedLog.Error("expire.bans", ex, "Unable to remove expired bans");
         }
     }
 }

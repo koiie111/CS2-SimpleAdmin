@@ -4,7 +4,7 @@ namespace CS2_SimpleAdmin.Database;
 
 public interface IDatabaseProvider
 {
-    Task<DbConnection> CreateConnectionAsync();
+    Task<DbConnection> CreateConnectionAsync(CancellationToken cancellationToken = default);
     Task<(bool Success, string? Exception)> CheckConnectionAsync();
     Task DatabaseMigrationAsync();
     
@@ -69,4 +69,16 @@ public interface IDatabaseProvider
 
     // Penalty history (css_history)
     string GetPenaltyHistoryQuery(bool multiServer);
+
+    // Connect load: all totals in one round trip
+    string GetPlayerPenaltyStatsQuery(bool multiServer);
+
+    // TimeMode 0 (online time), set-based over the online players
+    string GetUpdateMutePassedBatchQuery(bool multiServer);
+    string GetExpiredOnlineMutesBatchQuery(bool multiServer);
+
+    // Penalty history (css_history): filtered + paged in SQL
+    string GetPenaltyHistoryPageQuery(bool multiServer, string? type);
+    string GetPenaltyHistoryCountQuery(bool multiServer, string? type);
+
 }

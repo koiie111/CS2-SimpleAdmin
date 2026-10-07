@@ -5,20 +5,27 @@ namespace CS2_SimpleAdmin.Database;
 
 public class MySqlDatabaseProvider(string connectionString) : IDatabaseProvider
 {
-    public async Task<DbConnection> CreateConnectionAsync()
+    public async Task<DbConnection> CreateConnectionAsync(CancellationToken cancellationToken = default)
     {
         var connection = new MySqlConnection(connectionString);
-        await connection.OpenAsync();
-        
-        await using var cmd = connection.CreateCommand();
-        
-        cmd.CommandText = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci';";
-        await cmd.ExecuteNonQueryAsync();
-        
-        // cmd.CommandText = "SET time_zone = '+00:00';";
-        await cmd.ExecuteNonQueryAsync();
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
 
-        return connection;
+            // One round trip per checkout. Pooled connections are reset (COM_RESET_CONNECTION) when returned,
+            // which restores the handshake charset/collation, so the session collation has to be set again here.
+            // The site and plugin compare Cyrillic names with utf8mb4_general_ci; keep that explicit.
+            // time_zone is intentionally left at the server default (see FORK.md: Timezone must match MySQL NOW()).
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci';";
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<(bool Success, string? Exception)> CheckConnectionAsync()
@@ -435,6 +442,12 @@ public class MySqlDatabaseProvider(string connectionString) : IDatabaseProvider
         WHERE w.player_steamid = @PlayerSteamID {(multiServer ? "" : "AND w.server_id = @serverid")}
         ORDER BY created DESC
         """;
+
+    public string GetPlayerPenaltyStatsQuery(bool multiServer) => SharedQueries.PlayerPenaltyStats(multiServer);
+    public string GetUpdateMutePassedBatchQuery(bool multiServer) => SharedQueries.UpdateMutePassedBatch(multiServer);
+    public string GetExpiredOnlineMutesBatchQuery(bool multiServer) => SharedQueries.ExpiredOnlineMutesBatch(multiServer);
+    public string GetPenaltyHistoryPageQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryPage(multiServer, type);
+    public string GetPenaltyHistoryCountQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryCount(multiServer, type);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

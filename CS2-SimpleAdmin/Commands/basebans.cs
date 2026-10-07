@@ -4,6 +4,7 @@ using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.ValveConstants.Protobuf;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using CS2_SimpleAdmin.Menus;
 using CS2_SimpleAdminApi;
@@ -79,18 +80,27 @@ public partial class CS2_SimpleAdmin
             : (_localizer?["sa_console"] ?? "Console");
         
         // Get player and admin information
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle banning logic
-        Task.Run(async () =>
+        if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
         {
             int? penaltyId = await BanManager.BanPlayer(playerInfo, adminInfo, reason, time);
-            await Server.NextWorldUpdateAsync(() =>
+            if (penaltyId == null)
+            {
+                await ReportWriteFailureAsync(caller, $"Ban of {playerInfo.Name}");
+                return;
+            }
+
+            // Reject a reconnect right away instead of after the next cache refresh (up to a minute)
+            if (CacheManager is { } cache)
+                await cache.AddOrUpdateBanAsync(BanManager.LastBanRecord(penaltyId.Value, playerInfo, time));
+            await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Ban, reason, time, penaltyId);
             });
-        });
+        })) return;
 
         // Determine message keys and arguments based on ban time
         var (messageKey, activityMessageKey, centerArgs, adminActivityArgs) = time == 0
@@ -148,7 +158,7 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
         
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
         var player = Helper.GetPlayerFromSteamid64(steamid.SteamId64);
         if (player != null && player.IsValid)
         {
@@ -162,15 +172,15 @@ public partial class CS2_SimpleAdmin
             if (!caller.CanTarget(steamid))
                 return;
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid.SteamId64, adminInfo, reason, time);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Ban, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Ban, _localizer);
         }
@@ -205,7 +215,7 @@ public partial class CS2_SimpleAdmin
         if (!CheckValidBan(caller, time)) return;
 
         var adminInfo = caller != null && caller.UserId.HasValue
-            ? PlayersInfo[caller.SteamID]
+            ? GetPlayerInfo(caller)
             : null;
 
         var player = Helper.GetPlayerFromSteamid64(steamid);
@@ -223,15 +233,15 @@ public partial class CS2_SimpleAdmin
                 return;
             
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid, adminInfo, reason, time);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Ban, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Ban, _localizer);
 
@@ -275,7 +285,7 @@ public partial class CS2_SimpleAdmin
         if (!CheckValidBan(caller, time)) return;
 
         var adminInfo = caller != null && caller.UserId.HasValue
-            ? PlayersInfo[caller.SteamID]
+            ? GetPlayerInfo(caller)
             : null;
 
         var players = Helper.GetPlayerFromIp(ipAddress);
@@ -293,10 +303,10 @@ public partial class CS2_SimpleAdmin
         else
         {
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 await BanManager.AddBanByIp(ipAddress, adminInfo, reason, time);
-            });
+            })) return;
 
             command.ReplyToCommand($"Player with ip {ipAddress} is not online. Ban has been added offline.");
         }
@@ -351,7 +361,7 @@ public partial class CS2_SimpleAdmin
             : _localizer?["sa_unknown"] ?? "Unknown";
         
         reason = string.IsNullOrWhiteSpace(reason) ? _localizer?["sa_unknown"] ?? "Unknown" : reason;
-        Task.Run(async () => await BanManager.UnbanPlayer(pattern, callerSteamId, reason));
+        if (!TryQueuePenaltyWork(caller, command, "unban", _ => BanManager.UnbanPlayer(pattern, callerSteamId, reason))) return;
         Helper.LogCommand(caller, command);
         command.ReplyToCommand($"Unbanned player with pattern {pattern}.");
     }
@@ -424,14 +434,14 @@ public partial class CS2_SimpleAdmin
         }
 
         // Get player and admin information
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle warning logic
-        Task.Run(async () =>
+        if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
         {
             int? penaltyId = await WarnManager.WarnPlayer(playerInfo, adminInfo, reason, time);
-            await Server.NextWorldUpdateAsync(() =>
+            await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Warn, reason, time,
                     penaltyId);
@@ -451,13 +461,13 @@ public partial class CS2_SimpleAdmin
 
                 if (!string.IsNullOrEmpty(punishCommand))
                 {
-                    await Server.NextWorldUpdateAsync(() =>
+                    await Runtime.OnGameThread(() =>
                     {
                         Server.ExecuteCommand(punishCommand.Replace("USERID", playerInfo.UserId.ToString()).Replace("STEAMID64", playerInfo.SteamId?.ToString()));
                     });
                 }
             }
-        });
+        })) return;
 
         // Determine message keys and arguments based on warning time
         var (messageKey, activityMessageKey, centerArgs, adminActivityArgs) = time == 0
@@ -502,7 +512,7 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
         
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         var player = Helper.GetPlayerFromSteamid64(steamid.SteamId64);
 
@@ -520,10 +530,10 @@ public partial class CS2_SimpleAdmin
                 return;
             
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await WarnManager.AddWarnBySteamid(steamid.SteamId64, adminInfo, reason, time);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Warn, reason, time,
                         penaltyId);
@@ -543,13 +553,13 @@ public partial class CS2_SimpleAdmin
 
                     if (!string.IsNullOrEmpty(punishCommand))
                     {
-                        await Server.NextWorldUpdateAsync(() =>
+                        await Runtime.OnGameThread(() =>
                         {
                             Server.ExecuteCommand(punishCommand.Replace("STEAMID64", steamid.SteamId64.ToString()));
                         });
                     }
                 }
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Warn, _localizer);
         }
@@ -573,7 +583,7 @@ public partial class CS2_SimpleAdmin
         }
 
         var pattern = command.GetArg(1);
-        Task.Run(async () => await WarnManager.UnwarnPlayer(pattern));
+        if (!TryQueuePenaltyWork(caller, command, "unwarn", _ => WarnManager.UnwarnPlayer(pattern))) return;
         Helper.LogCommand(caller, command);
         command.ReplyToCommand($"Unwarned player with pattern {pattern}.");
     }

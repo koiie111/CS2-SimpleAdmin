@@ -8,6 +8,7 @@ using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Menu;
 using CounterStrikeSharp.API.Modules.Utils;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using CS2_SimpleAdmin.Menus;
 using CS2_SimpleAdminApi;
@@ -66,14 +67,22 @@ public partial class CS2_SimpleAdmin
             return;
         }
 
-        Task.Run(async () =>
+        if (!EnsureDatabaseReady(command)) return;
+
+        // Everything native/mutable is read here, on the game thread; the worker only gets these values
+        var targetInfo = PlayersInfo[steamId];
+        var callerLanguage = caller.GetLanguage();
+        var callerSlot = caller.Slot;
+        var callerSteamId = caller.SteamID;
+
+        if (!Runtime.TryQueueDb("penalties-info", async _ =>
         {
             try
             {
-                var warns = await WarnManager.GetPlayerWarns(PlayersInfo[steamId], false);
+                var warns = await WarnManager.GetPlayerWarns(targetInfo, false);
 
                 // Check if the player is muted
-                var activeMutes = await MuteManager.IsPlayerMuted(PlayersInfo[steamId].SteamId.SteamId64.ToString());
+                var activeMutes = await MuteManager.IsPlayerMuted(targetInfo.SteamId.SteamId64.ToString());
 
                 Dictionary<PenaltyType, List<string>> mutesList = new()
                 {
@@ -89,7 +98,7 @@ public partial class CS2_SimpleAdmin
                 {
                     DateTime ends = warn.ends;
                     if (_localizer == null) continue;
-                    using (new WithTemporaryCulture(caller.GetLanguage()))
+                    using (new WithTemporaryCulture(callerLanguage))
                         warnsList.Add(_localizer["sa_player_penalty_info_active_warn", ends.ToLocalTime().ToString(CultureInfo.CurrentCulture), (string)warn.reason]);
                     found = true;
                 }
@@ -106,7 +115,7 @@ public partial class CS2_SimpleAdmin
                     {
                         string muteType = mute.type;
                         DateTime ends = mute.ends;
-                        using (new WithTemporaryCulture(caller.GetLanguage()))
+                        using (new WithTemporaryCulture(callerLanguage))
                         {
                             switch (muteType)
                             {
@@ -138,26 +147,30 @@ public partial class CS2_SimpleAdmin
                         mutesList[PenaltyType.Silence].Add(_localizer["sa_player_penalty_info_no_active_silence"]);
                 }
 
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
-                    caller.SendLocalizedMessage(_localizer, "sa_player_penalty_info",
+                    // The caller may have left (or the slot been reused) while the queries ran
+                    var target = Utilities.GetPlayerFromSlot(callerSlot);
+                    if (target is not { IsValid: true } || target.SteamID != callerSteamId) return;
+                    target.SendLocalizedMessage(_localizer, "sa_player_penalty_info",
                     [
-                        PlayersInfo[steamId].Name,
-                        PlayersInfo[steamId].TotalBans,
-                        PlayersInfo[steamId].TotalGags,
-                        PlayersInfo[steamId].TotalMutes,
-                        PlayersInfo[steamId].TotalSilences,
-                        PlayersInfo[steamId].TotalWarns,
+                        targetInfo.Name,
+                        targetInfo.TotalBans,
+                        targetInfo.TotalGags,
+                        targetInfo.TotalMutes,
+                        targetInfo.TotalSilences,
+                        targetInfo.TotalWarns,
                         string.Join("\n", mutesList.SelectMany(kvp => kvp.Value)),
                         string.Join("\n", warnsList)
                     ]);
                 });
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger?.LogError($"Error processing player information: {ex}");
             }
-        });
+        }))
+            command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
     }
 
     /// <summary>
@@ -294,7 +307,7 @@ public partial class CS2_SimpleAdmin
         if (DatabaseProvider == null) return;
         
         var flagsList = flags.Split(',').Select(flag => flag.Trim()).ToList();
-        _ = Instance.PermissionManager.AddAdminBySteamId(steamid, name, flagsList, immunity, time, globalAdmin);
+        if (!TryQueuePenaltyWork(caller, command, "admin-add", _ => Instance.PermissionManager.AddAdminBySteamId(steamid, name, flagsList, immunity, time, globalAdmin))) return;
 
         Helper.LogCommand(caller, $"css_addadmin {steamid} {name} {flags} {immunity} {time}");
 
@@ -339,7 +352,7 @@ public partial class CS2_SimpleAdmin
     public void RemoveAdmin(CCSPlayerController? caller, string steamid, bool globalDelete = false, CommandInfo? command = null)
     {
         if (DatabaseProvider == null) return;
-        _ = PermissionManager.DeleteAdminBySteamId(steamid, globalDelete);
+        if (!TryQueuePenaltyWork(caller, command, "admin-delete", _ => PermissionManager.DeleteAdminBySteamId(steamid, globalDelete))) return;
 
         AddTimer(2, () =>
         {
@@ -410,7 +423,7 @@ public partial class CS2_SimpleAdmin
         if (DatabaseProvider == null) return;
 
         var flagsList = flags.Split(',').Select(flag => flag.Trim()).ToList();
-        _ = Instance.PermissionManager.AddGroup(name, flagsList, immunity, globalGroup);
+        if (!TryQueuePenaltyWork(caller, command, "group-add", _ => Instance.PermissionManager.AddGroup(name, flagsList, immunity, globalGroup))) return;
 
         Helper.LogCommand(caller, $"css_addgroup {name} {flags} {immunity}");
 
@@ -454,12 +467,12 @@ public partial class CS2_SimpleAdmin
     private void RemoveGroup(CCSPlayerController? caller, string name, CommandInfo? command = null)
     {
         if (DatabaseProvider == null) return;
-        _ = PermissionManager.DeleteGroup(name);
-
-        AddTimer(2, () =>
-        {
-            ReloadAdmins(caller);
-        }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+        // Reload after the delete has actually completed (was: a 2 s timer racing the background delete)
+        if (!TryQueuePenaltyWork(caller, command, "group-delete", async ct =>
+            {
+                await PermissionManager.DeleteGroup(name);
+                _ = ReloadAdminsAsync();
+            })) return;
 
         Helper.LogCommand(caller, $"css_delgroup {name}");
 
@@ -481,9 +494,10 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/root")]
     public void OnRelAdminCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        if (DatabaseProvider == null) return;
+        if (!EnsureDatabaseReady(command)) return;
         ReloadAdmins(caller);
-        command.ReplyToCommand("Reloaded sql admins and groups");
+        // Reloads are coalesced: a reload already running is followed by exactly one more
+        command.ReplyToCommand("Reloading sql admins and groups...");
     }
     
     /// <summary>
@@ -495,87 +509,51 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/root")]
     public void OnRelBans(CCSPlayerController? caller, CommandInfo command)
     {
-        if (DatabaseProvider == null) return;
+        if (!EnsureDatabaseReady(command)) return;
+        var cache = Instance.CacheManager;
+        if (cache == null) return;
 
-        _ = Instance.CacheManager?.ForceReInitializeCacheAsync();
-        command.ReplyToCommand("Reloaded bans");
+        // Built on a DB worker next to the current cache (which keeps serving checks), never on this thread
+        var config = Config;
+        var serverId = ServerId;
+        var callerSlot = caller?.Slot;
+        var callerSteamId = caller?.SteamID;
+        if (!Runtime.TryQueueDb("reload-bans", async ct =>
+            {
+                string message;
+                try
+                {
+                    await cache.ForceReInitializeCacheAsync(config, serverId, ct);
+                    message = $"Reloaded bans ({cache.Snapshot.ActiveCount} active)";
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    message = "Bans reload failed, the previous cache stays active: " + ex.Message;
+                }
+
+                await Runtime.OnGameThread(() =>
+                {
+                    var target = callerSlot.HasValue ? Utilities.GetPlayerFromSlot(callerSlot.Value) : null;
+                    if (target is { IsValid: true } && target.SteamID == callerSteamId) target.PrintToConsole(message);
+                    else if (callerSlot == null) Server.PrintToConsole(message);
+                });
+            }))
+        {
+            command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+            return;
+        }
+
+        command.ReplyToCommand("Reloading bans...");
     }
 
     /// <summary>
-    /// Reloads admin data asynchronously and updates admin caches.
+    /// Reloads admin data from the database (coalesced, see <see cref="ReloadAdminsAsync"/>).
     /// </summary>
     /// <param name="caller">The player issuing the reload command.</param>
-    private static readonly SemaphoreSlim ReloadAdminsLock = new(1, 1);
-    private static int _reloadGeneration;
-
     public void ReloadAdmins(CCSPlayerController? caller)
     {
         if (DatabaseProvider == null) return;
-
-        Task.Run(async () =>
-        {
-            // Serialize reloads end to end: overlapping ones (css_admins_reload, add admin, map change) race on the JSON files,
-            // and CSS reads them on timers up to 4s later. Capped so a hibernating server cannot hold the lock forever.
-            await ReloadAdminsLock.WaitAsync();
-            // If the cap expires (hibernation) and a newer reload runs, this one's pending timers must not apply a stale snapshot
-            var generation = Interlocked.Increment(ref _reloadGeneration);
-            try
-            {
-                await PermissionManager.CreateGroupsJsonFile();
-                var admins = await PermissionManager.CreateAdminsJsonFile();
-
-                var adminsFile = await File.ReadAllTextAsync(Instance.ModuleDirectory + "/data/admins.json");
-                var groupsFile = await File.ReadAllTextAsync(Instance.ModuleDirectory + "/data/groups.json");
-
-                var loaded = new TaskCompletionSource();
-                var scheduled = Server.NextWorldUpdateAsync(() =>
-                {
-                    AddTimer(1, () =>
-                    {
-                        if (!string.IsNullOrEmpty(adminsFile))
-                            AddTimer(2.0f, () =>
-                            {
-                                if (generation != _reloadGeneration) return;
-                                // Strip old permissions right before loading the new ones, not seconds earlier
-                                PermissionManager.ApplyAdminCache(admins);
-                                AdminManager.LoadAdminData(ModuleDirectory + "/data/admins.json");
-                            });
-                        if (!string.IsNullOrEmpty(groupsFile))
-                            AddTimer(3.0f, () =>
-                            {
-                                if (generation != _reloadGeneration) return;
-                                AdminManager.LoadAdminGroups(ModuleDirectory + "/data/groups.json");
-                            });
-                        AddTimer(4.0f, () =>
-                        {
-                            if (generation == _reloadGeneration)
-                            {
-                                if (!string.IsNullOrEmpty(adminsFile))
-                                    AdminManager.LoadAdminData(ModuleDirectory + "/data/admins.json");
-                                _logger?.LogInformation("Loaded admins!");
-                            }
-
-                            // Always completes, so a superseded reload cannot hold the lock until the cap
-                            loaded.TrySetResult();
-                        });
-                    });
-                });
-
-                await Task.WhenAny(Task.WhenAll(scheduled, loaded.Task), Task.Delay(TimeSpan.FromSeconds(15)));
-            }
-            catch (Exception ex)
-            {
-                // A failed DB read aborts here, leaving current permissions untouched
-                _logger?.LogError("Unable to reload admins: {exception}", ex.Message);
-            }
-            finally
-            {
-                ReloadAdminsLock.Release();
-            }
-        });
-
-        //_ = _adminManager.GiveAllGroupsFlags();
-        //_ = _adminManager.GiveAllFlags();
+        _ = ReloadAdminsAsync();
     }
 
     /// <summary>
@@ -594,6 +572,7 @@ public partial class CS2_SimpleAdmin
         if (!SilentPlayers.Add(caller.Slot))
         {
             SilentPlayers.Remove(caller.Slot);
+            PublishSilentSnapshot();
             caller.PrintToChat($"You aren't hidden now!");
             if (caller.TeamNum <= 1)
                 caller.ChangeTeam(CsTeam.Spectator);
@@ -601,6 +580,7 @@ public partial class CS2_SimpleAdmin
         }
         else
         {
+            PublishSilentSnapshot();
             Server.ExecuteCommand("sv_disable_teamselect_menu 1");
 
             if (caller.PlayerPawn?.Value?.LifeState == (int)LifeState_t.LIFE_ALIVE)
@@ -608,9 +588,9 @@ public partial class CS2_SimpleAdmin
 
             caller.PrintToChat($"You are hidden now!");
             if (caller.TeamNum > 1)
-                AddTimer(0.15f, () => { Server.NextWorldUpdate(() => caller.ChangeTeam(CsTeam.Spectator)); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
-            AddTimer(0.26f, () => { Server.NextWorldUpdate(() => caller.ChangeTeam(CsTeam.None)); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
-            AddTimer(0.50f, () => { Server.NextWorldUpdate(() => Server.ExecuteCommand("sv_disable_teamselect_menu 0")); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+                AddTimer(0.15f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.Spectator); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+            AddTimer(0.26f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.None); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+            AddTimer(0.50f, () => Server.ExecuteCommand("sv_disable_teamselect_menu 0"), CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
             SimpleAdminApi?.OnAdminToggleSilentEvent(caller.Slot, true);
         }
     }
@@ -662,12 +642,13 @@ public partial class CS2_SimpleAdmin
             if (!player.UserId.HasValue) return;
             if (!caller!.CanTarget(player)) return;
 
-            var playerInfo = PlayersInfo[player.SteamID];
+            var playerInfo = GetPlayerInfo(player);
 
-            Task.Run(async () =>
+            // One bounded game-thread item per target (no Task.Run hop: this was already the game thread)
+            Runtime.Dispatcher.TryPost(() =>
             {
-                await Server.NextWorldUpdateAsync(() =>
                 {
+                    if (!player.IsValid || caller is { IsValid: false }) return;
                     Action<string> printMethod = caller == null ? Server.PrintToConsole : caller.PrintToConsole;
                     
                     var adminData = AdminManager.GetPlayerAdminData(new SteamID(player.SteamID));
@@ -694,12 +675,14 @@ public partial class CS2_SimpleAdmin
                     printMethod($"• Total Silences: \"{playerInfo.TotalSilences}\"");
                     printMethod($"• Total Warns: \"{playerInfo.TotalWarns}\"");
 
-                    var chunkedAccounts = playerInfo.AccountsAssociated.ChunkBy(3).ToList();
-                    foreach (var chunk in chunkedAccounts)
+                    var shownAccounts = playerInfo.AccountsAssociated.Take(Managers.PlayerManager.MaxAssociatedAccountsShown).ToList();
+                    foreach (var chunk in shownAccounts.ChunkBy(3))
                         printMethod($"• Associated Accounts: \"{string.Join(", ", chunk.Select(a => $"{a.PlayerName} ({a.SteamId})"))}\"");
+                    if (playerInfo.AccountsAssociated.Count > shownAccounts.Count)
+                        printMethod($"• Associated Accounts: +{playerInfo.AccountsAssociated.Count - shownAccounts.Count} more");
 
                     printMethod($"--------- END INFO ABOUT \"{player.PlayerName}\" ---------");
-                });
+                }
             });
         });
     }
@@ -859,31 +842,39 @@ public partial class CS2_SimpleAdmin
             var userId = player.UserId.Value;
             var steamId = player.SteamID;
 
-            IMenu? warnsMenu = Helper.CreateMenu(_localizer["sa_admin_warns_menu_title", player.PlayerName]);
+            var targetInfo = GetPlayerInfo(player);
+            var menuTitle = _localizer["sa_admin_warns_menu_title", player.PlayerName];
+            var callerSteamId = caller.SteamID;
 
-            Task.Run(async () =>
+            // DB read on a worker; the menu is created, filled and opened on the game thread
+            if (!Runtime.TryQueueDb("warns-menu", async _ =>
             {
-                var warnsList = await WarnManager.GetPlayerWarns(PlayersInfo[steamId], false);
+                var warnsList = await WarnManager.GetPlayerWarns(targetInfo, false);
                 var sortedWarns = warnsList
                     .OrderBy(warn => (string)warn.status == "ACTIVE" ? 0 : 1)
                     .ThenByDescending(warn => (int)warn.id)
+                    .Select(warn => (Id: (int)warn.id, Active: (string)warn.status == "ACTIVE", Reason: (string)warn.reason))
                     .ToList();
 
-                sortedWarns.ForEach(w =>
+                await Runtime.OnGameThread(() =>
                 {
-                    warnsMenu?.AddMenuOption($"[{((string)w.status == "ACTIVE" ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {(string)w.reason}",
-                        (controller, option) =>
-                        {
-                            _ = WarnManager.UnwarnPlayer(PlayersInfo[steamId], (int)w.id);
-                            player.PrintToChat(_localizer["sa_admin_warns_unwarn", player.PlayerName, (string)w.reason]);
-                        });
-                });
+                    if (!caller.IsValid || caller.SteamID != callerSteamId) return;
+                    IMenu? warnsMenu = Helper.CreateMenu(menuTitle);
+                    foreach (var w in sortedWarns)
+                    {
+                        warnsMenu?.AddMenuOption($"[{(w.Active ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {w.Reason}",
+                            (controller, option) =>
+                            {
+                                if (!TryQueuePenaltyWork(controller, null, "unwarn", _ => WarnManager.UnwarnPlayer(targetInfo, w.Id))) return;
+                                if (player.IsValid)
+                                    player.PrintToChat(_localizer["sa_admin_warns_unwarn", player.PlayerName, w.Reason]);
+                            });
+                    }
 
-                await Server.NextWorldUpdateAsync(() =>
-                {
                     warnsMenu?.Open(caller);
                 });
-            });
+            }))
+                command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
         });
     }
 
@@ -892,17 +883,26 @@ public partial class CS2_SimpleAdmin
     /// Accepts a SteamID64 so it also works for players who are not online.
     /// </summary>
     /// <param name="caller">The player issuing the command or null for console.</param>
-    /// <param name="command">The command containing the target and an optional penalty type filter.</param>
+    /// <param name="command">The command containing the target, an optional penalty type filter and page.</param>
     [RequiresPermissions("@css/kick")]
-    [CommandHelper(minArgs: 1, usage: "<#userid or name or steamid64> [bans|gags|mutes|silences|warns]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [CommandHelper(minArgs: 1, usage: "<#userid or name or steamid64> [bans|gags|mutes|silences|warns] [page]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnHistoryCommand(CCSPlayerController? caller, CommandInfo command)
     {
         if (DatabaseProvider == null || _localizer == null) return;
 
-        var filter = command.ArgCount > 2 ? command.GetArg(2).ToLowerInvariant() : null;
+        // [type] and [page] are optional and may come in either position: "bans 2", "2", "bans"
+        string? filter = null;
+        var page = 1;
+        for (var i = 2; i < command.ArgCount; i++)
+        {
+            var arg = command.GetArg(i);
+            if (int.TryParse(arg, out var p) && p > 0) page = p;
+            else filter = arg.ToLowerInvariant();
+        }
+
         if (filter is not (null or "bans" or "gags" or "mutes" or "silences" or "warns"))
         {
-            command.ReplyToCommand("Usage: css_history <#userid or name or steamid64> [bans|gags|mutes|silences|warns]");
+            command.ReplyToCommand("Usage: css_history <#userid or name or steamid64> [bans|gags|mutes|silences|warns] [page]");
             return;
         }
 
@@ -935,47 +935,92 @@ public partial class CS2_SimpleAdmin
             name = player.PlayerName;
         }
 
+        if (!EnsureDatabaseReady(command)) return;
         Helper.LogCommand(caller, command);
-        Action<string> print = caller == null ? Server.PrintToConsole : caller.PrintToConsole;
-        var callerSteamId = caller?.SteamID;
-
-        Task.Run(async () =>
-        {
-            var rows = await PlayerManager.GetPenaltyHistory(steamId, filter);
-            // Offline players are only known by SteamID; borrow the name stored on their latest record
-            name ??= rows.Count > 0 ? (string?)rows[0].player_name : null;
-
-            await Server.NextWorldUpdateAsync(() =>
-            {
-                // The slot may have been reused by another player while the query ran
-                if (caller != null && (!caller.IsValid || caller.SteamID != callerSteamId)) return;
-                PrintHistory(print, name ?? steamId.ToString(), steamId, rows);
-            });
-        });
+        QueueHistoryPrint(caller, steamId, name, filter, page, command);
     }
 
+    /// <summary>Console page size of css_history. Older entries are reachable with the page argument.</summary>
+    internal const int HistoryConsolePageSize = 50;
+    /// <summary>Lines printed per game-thread item; the dispatcher budget spreads the rest over following updates.</summary>
+    internal const int HistoryLinesPerUpdate = 20;
+
     /// <summary>
-    /// Writes history rows from <see cref="PlayerManager.GetPenaltyHistory"/> as one console line each.
+    /// Loads one page in SQL (filtered, stable order) on a DB worker, formats it there, and prints it on the game
+    /// thread in chunks of <see cref="HistoryLinesPerUpdate"/> lines, each chunk re-checking the caller.
     /// </summary>
-    internal void PrintHistory(Action<string> print, string name, ulong steamId, List<dynamic> rows)
+    internal void QueueHistoryPrint(CCSPlayerController? caller, ulong steamId, string? name, string? filter, int page,
+        CommandInfo? command)
     {
-        if (_localizer == null) return;
+        var callerSlot = caller?.Slot;
+        var callerSteamId = caller?.SteamID;
+        var multiServer = Config.MultiServerMode;
+        var serverId = ServerId;
+        var localizer = _localizer!;
 
-        if (rows.Count == 0)
+        var accepted = Runtime.TryQueueDb("history", async ct =>
         {
-            print(_localizer["sa_history_none", name]);
-            return;
+            var result = await PlayerManager.GetPenaltyHistoryPage(steamId, filter, page, HistoryConsolePageSize, multiServer, serverId, ct);
+            // Offline players are only known by SteamID; borrow the name stored on their latest record
+            var displayName = name ?? (result.Rows.Count > 0 ? result.Rows[0].Player_Name : null) ?? steamId.ToString();
+            var lines = FormatHistory(localizer, displayName, steamId, result, filter);
+
+            for (var i = 0; i < lines.Count; i += HistoryLinesPerUpdate)
+            {
+                var chunk = lines.GetRange(i, Math.Min(HistoryLinesPerUpdate, lines.Count - i));
+                await Runtime.OnGameThread(() =>
+                {
+                    if (callerSlot == null)
+                    {
+                        foreach (var line in chunk) Server.PrintToConsole(line);
+                        return;
+                    }
+
+                    // The caller may have left or the slot been reused while the query ran
+                    var target = Utilities.GetPlayerFromSlot(callerSlot.Value);
+                    if (target is not { IsValid: true } || target.SteamID != callerSteamId) return;
+                    foreach (var line in chunk) target.PrintToConsole(line);
+                });
+            }
+        });
+
+        if (!accepted)
+            command?.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+    }
+
+    /// <summary>Formats one history page as console lines (worker thread; pure).</summary>
+    internal static List<string> FormatHistory(Microsoft.Extensions.Localization.IStringLocalizer localizer, string name,
+        ulong steamId, PlayerManager.HistoryPage result, string? filter)
+    {
+        var lines = new List<string>(result.Rows.Count + 2);
+        if (result.Total == 0)
+        {
+            lines.Add(localizer["sa_history_none", name]);
+            return lines;
         }
 
-        print(_localizer["sa_history_header", name, steamId, rows.Count]);
-        foreach (var r in rows)
+        lines.Add(localizer["sa_history_header", name, steamId, result.Total]);
+        foreach (var r in result.Rows)
+            lines.Add(FormatHistoryRow(r));
+
+        if (result.Pages > 1)
         {
-            var duration = (int)r.duration == 0 ? "perm" : $"{(int)r.duration}m";
-            var line = $"[{Date(r.created)}] {(string)r.type,-7} {(string)r.status,-8} {duration,-6} by {(string)r.admin_name}: {(string)r.reason}";
-            if (r.lift_date != null)
-                line += $" | lifted {Date(r.lift_date)} by {(string?)r.lift_admin ?? "?"}: {(string?)r.lift_reason}";
-            print(line);
+            var next = result.Page < result.Pages
+                ? $" - next: css_history {steamId}{(filter != null ? " " + filter : "")} {result.Page + 1}"
+                : "";
+            lines.Add($"----- page {result.Page}/{result.Pages}{next} -----");
         }
+
+        return lines;
+    }
+
+    internal static string FormatHistoryRow(PenaltyHistoryRow r)
+    {
+        var duration = r.Duration == 0 ? "perm" : $"{r.Duration}m";
+        var line = $"[{Date(r.Created)}] {r.Type,-7} {r.Status,-8} {duration,-6} by {r.Admin_Name}: {r.Reason}";
+        if (r.Lift_Date != null)
+            line += $" | lifted {Date(r.Lift_Date)} by {r.Lift_Admin ?? "?"}: {r.Lift_Reason}";
+        return line;
 
         static string Date(object? value) => PlayerManager.ToDateTime(value)?.ToString("yyyy-MM-dd HH:mm") ?? "?";
     }
@@ -1126,8 +1171,8 @@ public partial class CS2_SimpleAdmin
         callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
         reason ??= _localizer?["sa_unknown"] ?? "Unknown";
         
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
         
         // Determine message keys and arguments for the kick notification
         var (messageKey, activityMessageKey, centerArgs, adminActivityArgs) =

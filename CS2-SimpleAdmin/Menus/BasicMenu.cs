@@ -146,42 +146,62 @@ public abstract class BasicMenu
                 var playerName = player.PlayerName.Length > 26 ? player.PlayerName[..26] : player.PlayerName;
                 historyMenu.AddOption(playerName, _ =>
                 {
-                    var steamId = player.SteamID;
-                    var name = player.PlayerName;
-                    var adminSteamId = admin.SteamID;
-
-                    // The list is built after the DB round trip, so it is opened from the world update rather than returned here
-                    Task.Run(async () =>
-                    {
-                        var rows = await CS2_SimpleAdmin.PlayerManager.GetPenaltyHistory(steamId);
-                        await Server.NextWorldUpdateAsync(() =>
-                        {
-                            // The slot may have been reused by another player while the query ran
-                            if (!admin.IsValid || admin.SteamID != adminSteamId) return;
-
-                            if (rows.Count == 0)
-                            {
-                                CS2_SimpleAdmin.Instance.PrintHistory(admin.PrintToConsole, name, steamId, rows);
-                                return;
-                            }
-
-                            var list = new MenuBuilder("sa_history", admin, localizer);
-                            foreach (var row in rows)
-                            {
-                                var active = (string)row.status == "ACTIVE";
-                                var label = $"[{(active ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {(string)row.type} {(string)row.reason}";
-                                list.AddOption(label.Length > 40 ? label[..40] : label,
-                                    _ => CS2_SimpleAdmin.Instance.PrintHistory(admin.PrintToConsole, name, steamId, [row]));
-                            }
-
-                            // Built standalone, so the back button must be wired to the player list explicitly
-                            list.WithBackAction(historyMenu.OpenMenu).OpenMenu(admin);
-                        });
-                    });
+                    OpenHistoryPage(admin, historyMenu, player.SteamID, player.PlayerName, 1);
                 });
             }
 
             return historyMenu.WithBackButton();
+        }
+
+        /// <summary>Entries per history menu page; older entries are behind the "next page" option.</summary>
+        internal const int HistoryMenuPageSize = 20;
+
+        /// <summary>
+        /// Loads one history page in SQL on a DB worker and opens it as a menu on the game thread.
+        /// Pages are bounded (no menu with thousands of options/closures); navigation re-queries the next page.
+        /// </summary>
+        private static void OpenHistoryPage(CCSPlayerController admin, MenuBuilder playerList, ulong steamId, string name, int page)
+        {
+            var localizer = CS2_SimpleAdmin._localizer;
+            var adminSteamId = admin.SteamID;
+            var multiServer = CS2_SimpleAdmin.Instance.Config.MultiServerMode;
+            var serverId = CS2_SimpleAdmin.ServerId;
+
+            if (!CS2_SimpleAdmin.EnsureDatabaseReady(null)) return;
+            var accepted = Infrastructure.Runtime.TryQueueDb("history-menu", async ct =>
+            {
+                var result = await Managers.PlayerManager.GetPenaltyHistoryPage(steamId, null, page, HistoryMenuPageSize, multiServer, serverId, ct);
+                await Infrastructure.Runtime.OnGameThread(() =>
+                {
+                    // The slot may have been reused by another player while the query ran
+                    if (!admin.IsValid || admin.SteamID != adminSteamId) return;
+
+                    if (result.Total == 0)
+                    {
+                        if (localizer != null) admin.PrintToConsole(localizer["sa_history_none", name]);
+                        return;
+                    }
+
+                    var list = new MenuBuilder("sa_history", admin, localizer);
+                    foreach (var row in result.Rows)
+                    {
+                        var active = row.Status == "ACTIVE";
+                        var label = $"[{(active ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {row.Type} {row.Reason}";
+                        var line = CS2_SimpleAdmin.FormatHistoryRow(row);
+                        list.AddOption(label.Length > 40 ? label[..40] : label, _ => admin.PrintToConsole(line));
+                    }
+
+                    if (result.Page < result.Pages)
+                        list.AddOption($"» {result.Page + 1}/{result.Pages}", _ => OpenHistoryPage(admin, playerList, steamId, name, result.Page + 1));
+                    if (result.Page > 1)
+                        list.AddOption($"« {result.Page - 1}/{result.Pages}", _ => OpenHistoryPage(admin, playerList, steamId, name, result.Page - 1));
+
+                    // Built standalone, so the back button must be wired to the player list explicitly
+                    list.WithBackAction(playerList.OpenMenu).OpenMenu(admin);
+                });
+            });
+
+            if (!accepted) admin.PrintToChat("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
         }
 
         /// <summary>

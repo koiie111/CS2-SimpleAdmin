@@ -3,6 +3,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using CS2_SimpleAdmin.Menus;
 using CS2_SimpleAdminApi;
@@ -74,19 +75,19 @@ public partial class CS2_SimpleAdmin
         callerName ??= caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
 
         // Get player and admin information
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle gag logic
-        Task.Run(async () =>
+        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time);
-            await Server.NextWorldUpdateAsync(() =>
+            await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Gag, reason, time,
                     penaltyId);
             });
-        });
+        })) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Gag, Time.ActualDateTime().AddMinutes(time), time);
@@ -110,7 +111,7 @@ public partial class CS2_SimpleAdmin
         }
 
         // Increment the player's total gags count
-        PlayersInfo[player.SteamID].TotalGags++;
+        GetPlayerInfo(player).TotalGags++;
 
         // Log the gag command and send Discord notification
         if (!silent)
@@ -138,7 +139,7 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
         
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         var player = Helper.GetPlayerFromSteamid64(steamid.SteamId64);
 
@@ -155,15 +156,15 @@ public partial class CS2_SimpleAdmin
                 return;
             
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 3);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Gag, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Gag, _localizer);
         }
@@ -204,7 +205,7 @@ public partial class CS2_SimpleAdmin
         if (!CheckValidMute(caller, time)) return;
 
         // Get player and admin info
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Attempt to match player based on SteamID
         var player = Helper.GetPlayerFromSteamid64(steamid);
@@ -223,15 +224,15 @@ public partial class CS2_SimpleAdmin
                 return;
 
             // Asynchronous gag operation for offline players
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Gag, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Gag, _localizer);
 
@@ -278,10 +279,10 @@ public partial class CS2_SimpleAdmin
             {
                 PlayerPenaltyManager.RemovePenaltiesByType(player.Slot, PenaltyType.Gag);
 
-                Task.Run(async () =>
+                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
                 {
                     await MuteManager.UnmutePlayer(player.SteamID.ToString(), callerSteamId, reason);
-                });
+                })) return;
 
                 command.ReplyToCommand($"Ungaged player {player.PlayerName}.");
                 return;
@@ -296,22 +297,22 @@ public partial class CS2_SimpleAdmin
         {
             PlayerPenaltyManager.RemovePenaltiesByType(namePlayer.Slot, PenaltyType.Gag);
 
-            if (namePlayer.UserId.HasValue && PlayersInfo[namePlayer.SteamID].TotalGags > 0)
-                PlayersInfo[namePlayer.SteamID].TotalGags--;
+            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalGags > 0)
+                GetPlayerInfo(namePlayer).TotalGags--;
 
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(namePlayer.SteamID.ToString(), callerSteamId, reason);
-            });
+            })) return;
 
             command.ReplyToCommand($"Ungaged player {namePlayer.PlayerName}.");
         }
         else
         {
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(pattern, callerSteamId, reason);
-            });
+            })) return;
 
             command.ReplyToCommand($"Ungaged offline player with pattern {pattern}.");
         }
@@ -380,22 +381,22 @@ public partial class CS2_SimpleAdmin
         callerName ??= caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
 
         // Get player and admin information
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Set player's voice flags to muted
         player.VoiceFlags = VoiceFlags.Muted;
 
         // Asynchronously handle mute logic
-        Task.Run(async () =>
+        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 1);
-            await Server.NextWorldUpdateAsync(() =>
+            await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Mute, reason, time,
                     penaltyId);
             });
-        });
+        })) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Mute, Time.ActualDateTime().AddMinutes(time), time);
@@ -419,7 +420,7 @@ public partial class CS2_SimpleAdmin
         }
 
         // Increment the player's total mutes count
-        PlayersInfo[player.SteamID].TotalMutes++;
+        GetPlayerInfo(player).TotalMutes++;
 
         // Log the mute command and send Discord notification
         if (!silent)
@@ -468,7 +469,7 @@ public partial class CS2_SimpleAdmin
         if (!CheckValidMute(caller, time)) return;
 
         // Get player and admin info
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Attempt to match player based on SteamID
         var player = Helper.GetPlayerFromSteamid64(steamid);
@@ -487,15 +488,15 @@ public partial class CS2_SimpleAdmin
                 return;
 
             // Asynchronous mute operation for offline players
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time, 1);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Mute, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Mute, _localizer);
             
@@ -521,7 +522,7 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
         
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         var player = Helper.GetPlayerFromSteamid64(steamid.SteamId64);
 
@@ -538,15 +539,15 @@ public partial class CS2_SimpleAdmin
                 return;
             
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 1);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Mute, reason, time,
                         penaltyId);
                 });
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Mute, _localizer);
         }
@@ -590,10 +591,10 @@ public partial class CS2_SimpleAdmin
                 PlayerPenaltyManager.RemovePenaltiesByType(player.Slot, PenaltyType.Mute);
                 player.VoiceFlags = VoiceFlags.Normal;
 
-                Task.Run(async () =>
+                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
                 {
                     await MuteManager.UnmutePlayer(player.SteamID.ToString(), callerSteamId, reason, 1);
-                });
+                })) return;
 
                 command.ReplyToCommand($"Unmuted player {player.PlayerName}.");
                 return;
@@ -609,22 +610,22 @@ public partial class CS2_SimpleAdmin
             PlayerPenaltyManager.RemovePenaltiesByType(namePlayer.Slot, PenaltyType.Mute);
             namePlayer.VoiceFlags = VoiceFlags.Normal;
 
-            if (namePlayer.UserId.HasValue && PlayersInfo[namePlayer.SteamID].TotalMutes > 0)
-                PlayersInfo[namePlayer.SteamID].TotalMutes--;
+            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalMutes > 0)
+                GetPlayerInfo(namePlayer).TotalMutes--;
 
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(namePlayer.SteamID.ToString(), callerSteamId, reason, 1);
-            });
+            })) return;
 
             command.ReplyToCommand($"Unmuted player {namePlayer.PlayerName}.");
         }
         else
         {
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(pattern, callerSteamId, reason, 1);
-            });
+            })) return;
 
             command.ReplyToCommand($"Unmuted offline player with pattern {pattern}.");
         }
@@ -694,19 +695,19 @@ public partial class CS2_SimpleAdmin
         callerName ??= caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
 
         // Get player and admin information
-        var playerInfo = PlayersInfo[player.SteamID];
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var playerInfo = GetPlayerInfo(player);
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle silence logic
-        Task.Run(async () =>
+        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 2); 
-            await Server.NextWorldUpdateAsync(() =>
+            await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Silence, reason, time,
                     penaltyId);
             });
-        });
+        })) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Silence, Time.ActualDateTime().AddMinutes(time), time);
@@ -731,7 +732,7 @@ public partial class CS2_SimpleAdmin
         }
 
         // Increment the player's total silences count
-        PlayersInfo[player.SteamID].TotalSilences++;
+        GetPlayerInfo(player).TotalSilences++;
 
         // Log the silence command and send Discord notification
         if (!silent)
@@ -781,7 +782,7 @@ public partial class CS2_SimpleAdmin
         if (!CheckValidMute(caller, time)) return;
 
         // Get player and admin info
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Attempt to match player based on SteamID
         var player = Helper.GetPlayerFromSteamid64(steamid);
@@ -800,15 +801,15 @@ public partial class CS2_SimpleAdmin
                 return;
 
             // Asynchronous silence operation for offline players
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time, 2);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Silence, reason,
                         time, penaltyId);
                 });
-            });
+            })) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Silence, _localizer);
 
@@ -834,7 +835,7 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
         
-        var adminInfo = caller != null && caller.UserId.HasValue ? PlayersInfo[caller.SteamID] : null;
+        var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         var player = Helper.GetPlayerFromSteamid64(steamid.SteamId64);
 
@@ -851,15 +852,15 @@ public partial class CS2_SimpleAdmin
                 return;
             
             // Asynchronous ban operation if player is not online or not found
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 2);
-                await Server.NextWorldUpdateAsync(() =>
+                await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Silence, reason,
                         time, penaltyId);
                 });
-            });
+            })) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Silence, _localizer);
         }
@@ -905,10 +906,10 @@ public partial class CS2_SimpleAdmin
                 // Reset voice flags to normal
                 player.VoiceFlags = VoiceFlags.Normal;
 
-                Task.Run(async () =>
+                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
                 {
                     await MuteManager.UnmutePlayer(player.SteamID.ToString(), callerSteamId, reason, 2); // Unmute by type 2 (silence)
-                });
+                })) return;
 
                 command.ReplyToCommand($"Unsilenced player {player.PlayerName}.");
                 return;
@@ -926,22 +927,22 @@ public partial class CS2_SimpleAdmin
             // Reset voice flags to normal
             namePlayer.VoiceFlags = VoiceFlags.Normal;
 
-            if (namePlayer.UserId.HasValue && PlayersInfo[namePlayer.SteamID].TotalSilences > 0)
-                PlayersInfo[namePlayer.SteamID].TotalSilences--;
+            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalSilences > 0)
+                GetPlayerInfo(namePlayer).TotalSilences--;
 
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(namePlayer.SteamID.ToString(), callerSteamId, reason, 2); // Unmute by type 2 (silence)
-            });
+            })) return;
 
             command.ReplyToCommand($"Unsilenced player {namePlayer.PlayerName}.");
         }
         else
         {
-            Task.Run(async () =>
+            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 await MuteManager.UnmutePlayer(pattern, callerSteamId, reason, 2); // Unmute by type 2 (silence)
-            });
+            })) return;
 
             command.ReplyToCommand($"Unsilenced offline player with pattern {pattern}.");
         }

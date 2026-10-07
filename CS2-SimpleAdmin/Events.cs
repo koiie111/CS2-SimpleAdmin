@@ -4,6 +4,7 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Entities;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using CS2_SimpleAdmin.Models;
 using CS2_SimpleAdminApi;
@@ -18,7 +19,25 @@ namespace CS2_SimpleAdmin;
 public partial class CS2_SimpleAdmin
 {
     private bool _serverLoading;
-    
+    private bool _adminsReloadAfterCoreScheduled;
+
+    /// <summary>At most one pending re-apply timer; the reload itself is coalesced as well.</summary>
+    private void ScheduleAdminsReloadAfterCoreReload()
+    {
+        if (_adminsReloadAfterCoreScheduled)
+        {
+            Interlocked.Increment(ref PluginMetrics.ReloadAdminsCoalesced);
+            return;
+        }
+
+        _adminsReloadAfterCoreScheduled = true;
+        AddTimer(1.0f, () =>
+        {
+            _adminsReloadAfterCoreScheduled = false;
+            ReloadAdmins(null);
+        });
+    }
+
     private void RegisterEvents()
     {
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
@@ -72,9 +91,19 @@ public partial class CS2_SimpleAdmin
     {
         if (ServerLoaded || _serverLoading)
             return;
-        
+
+        // A failed startup (DB down, migration error) is retried here, i.e. on the next map start at the latest
+        if (Runtime.State == PluginState.Failed && DatabaseProvider != null && _databaseInit.IsCompleted)
+            StartDatabaseInitialization();
+
         _serverLoading = true;
         new ServerManager().LoadServerData();
+    }
+
+    /// <summary>Game thread: a failed server load releases the flag so the next map start tries again.</summary>
+    internal void ReleaseServerLoading()
+    {
+        if (!ServerLoaded) _serverLoading = false;
     }
 
     [GameEventHandler]
@@ -94,7 +123,10 @@ public partial class CS2_SimpleAdmin
         
         CachedPlayers.Remove(player);
         BotPlayers.Remove(player);
-        SilentPlayers.Remove(player.Slot);
+        if (SilentPlayers.Remove(player.Slot))
+            PublishSilentSnapshot();
+        // Every background result for this connection becomes stale from here on
+        Runtime.Sessions.End(player.Slot);
 
         if (player.IsBot)
         {
@@ -173,14 +205,16 @@ public partial class CS2_SimpleAdmin
         Logger.LogCritical("[OnClientConnected]");
 #endif
 
+        var start = LatencyHistogram.Now();
         var player = Utilities.GetPlayerFromSlot(playerslot);
         if (player == null || !player.IsValid || player.IsBot)
             return;
-        
+
         if (!CachedPlayers.Contains(player))
             CachedPlayers.Add(player);
-        
+
         PlayerManager.LoadPlayerData(player);
+        PluginMetrics.ConnectHandler.RecordSince(start);
     }
 
 //     private void OnClientConnect(int playerslot, string name, string ipaddress)
@@ -237,7 +271,10 @@ public partial class CS2_SimpleAdmin
             return HookResult.Continue;
         }
 
+        var start = LatencyHistogram.Now();
+        // Same connection as OnClientConnected → deduplicated by the session inside LoadPlayerData
         PlayerManager.LoadPlayerData(player, true);
+        PluginMetrics.ConnectHandler.RecordSince(start);
         return HookResult.Continue;
     }
 
@@ -253,21 +290,9 @@ public partial class CS2_SimpleAdmin
             player.DiePosition = null;
         }
 
-        AddTimer(0.5f, () =>
-        {
-            foreach (var list in RenamedPlayers)
-            {
-                var player = Utilities.GetPlayerFromSteamId(list.Key);
-
-                if (player == null || !player.IsValid || player.Connected != PlayerConnectedState.Connected)
-                    continue;
-
-                if (player.PlayerName.Equals(list.Value))
-                    continue;
-
-                player.Rename(list.Value);
-            }
-        });
+        // Walk the online players and look each up, instead of every stored rename × a fresh player list
+        if (RenamedPlayers.Count > 0)
+            AddTimer(0.5f, Managers.PlayerManager.EnforceRenamesOnline);
 
         return HookResult.Continue;
     }
@@ -278,6 +303,10 @@ public partial class CS2_SimpleAdmin
         if (author == null || !author.IsValid || author.IsBot)
             return HookResult.Continue;
 
+        // Fast path: no gag/silence entry for this slot → no clock read, no allocation
+        if (!PlayerPenaltyManager.HasAnyPenalty(author.Slot, PenaltyType.Gag, PenaltyType.Silence))
+            return HookResult.Continue;
+
         if (!PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Gag, out DateTime? endDateTime) &&
             !PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Silence, out endDateTime))
             return HookResult.Continue;
@@ -286,8 +315,7 @@ public partial class CS2_SimpleAdmin
             return HookResult.Continue;
 
         var message = um.ReadString("param2");
-        var triggers = CoreConfig.PublicChatTrigger.Concat(CoreConfig.SilentChatTrigger);
-        if (!triggers.Any(trigger => message.StartsWith(trigger))) return HookResult.Stop;
+        if (!ChatTriggers.StartsWithTrigger(message)) return HookResult.Stop;
         
         for (var i = um.Recipients.Count - 1; i >= 0; i--)
         {
@@ -304,67 +332,89 @@ public partial class CS2_SimpleAdmin
 
     private HookResult ComamndListenerHandler(CCSPlayerController? player, CommandInfo info)
     {
+        var start = LatencyHistogram.Now();
+        try
+        {
+            return CommandListenerCore(player, info);
+        }
+        finally
+        {
+            PluginMetrics.CommandListener.RecordSince(start);
+        }
+    }
+
+    private HookResult CommandListenerCore(CCSPlayerController? player, CommandInfo info)
+    {
         if (player == null || !player.IsValid || player.IsBot)
             return HookResult.Continue;
 
-        var command = info.GetArg(0).ToLower();
+        // Ordinal-ignore-case comparisons instead of a lower-cased copy of every command
+        var command = info.GetArg(0);
 
-        if (Config.OtherSettings.AdditionalCommandsToLog.Contains(command))
+        if (CommandLogFilter.ShouldLog(Config.OtherSettings.AdditionalCommandsToLog, command))
             Helper.LogCommand(player, info);
 
-        switch (command)
+        if (command.Equals("css_admins_reload", StringComparison.OrdinalIgnoreCase))
         {
-            case "css_admins_reload":
-                AddTimer(1.0f, () => ReloadAdmins(null));
+            // CSS core's own css_admins_reload (@css/generic) wipes the admins loaded from SQL; re-apply them a moment
+            // later. Checked and rate-limited here so an unauthorised or spammed command cannot pile up reloads.
+            if (AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/generic"))
+                ScheduleAdminsReloadAfterCoreReload();
+            return HookResult.Continue;
+        }
+
+        if (command.Equals("callvote", StringComparison.OrdinalIgnoreCase))
+        {
+            var voteType = info.GetArg(1);
+
+            if (!voteType.Equals("kick", StringComparison.OrdinalIgnoreCase))
                 return HookResult.Continue;
-            case "callvote":
-            {
-                var voteType = info.GetArg(1).ToLower();
-            
-                if (voteType != "kick")
-                    return HookResult.Continue;
 
-                var target = int.TryParse(info.GetArg(2), out var userId) 
-                    ? Utilities.GetPlayerFromUserid(userId) 
-                    : null;
-        
-                if (target == null || !target.IsValid || target.Connected != PlayerConnectedState.Connected)
-                    return HookResult.Continue;
-                
-                return !player.CanTarget(target) ? HookResult.Stop : HookResult.Continue;
-            }
+            var target = int.TryParse(info.GetArg(2), out var userId)
+                ? Utilities.GetPlayerFromUserid(userId)
+                : null;
+
+            if (target == null || !target.IsValid || target.Connected != PlayerConnectedState.Connected)
+                return HookResult.Continue;
+
+            return !player.CanTarget(target) ? HookResult.Stop : HookResult.Continue;
         }
 
-        if (!command.Contains("say"))
+        if (command.IndexOf("say", StringComparison.OrdinalIgnoreCase) < 0)
             return HookResult.Continue;
-        
-        if (info.GetArg(1).Length == 0)
+
+        var text = info.GetArg(1);
+        if (text.Length == 0)
             return HookResult.Stop;
-        
-        var triggers = CoreConfig.PublicChatTrigger.Concat(CoreConfig.SilentChatTrigger);
-        if (triggers.Any(trigger => info.GetArg(1).StartsWith(trigger)))
+
+        if (ChatTriggers.StartsWithTrigger(text))
         {
             return HookResult.Continue;
         }
-        
-        // if (!Config.OtherSettings.UserMessageGagChatType)
-        // {
-            if (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out DateTime? endDateTime) ||
-                PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out endDateTime))
-            {
-                if (_localizer != null && endDateTime is not null)
-                    player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
-                return HookResult.Stop;
-            }
-        // }
-        
-        if (AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat") && command == "say" && info.GetArg(1).StartsWith($"@"))
+
+        var checkStart = LatencyHistogram.Now();
+        DateTime? endDateTime = null;
+        var gagged = PlayerPenaltyManager.HasAnyPenalty(player.Slot, PenaltyType.Gag, PenaltyType.Silence) &&
+                     (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out endDateTime) ||
+                      PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out endDateTime));
+        PluginMetrics.ChatPenaltyCheck.RecordSince(checkStart);
+        if (gagged)
         {
-            player.ExecuteClientCommandFromServer($"css_say {info.GetArg(1).Remove(0, 1)}");
+            if (_localizer != null && endDateTime is not null)
+                player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
             return HookResult.Stop;
         }
-        
-        if (command != "say_team" || !info.GetArg(1).StartsWith($"@")) return HookResult.Continue;
+
+        if (text[0] != '@') return HookResult.Continue;
+
+        if (command.Equals("say", StringComparison.OrdinalIgnoreCase) &&
+            AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))
+        {
+            player.ExecuteClientCommandFromServer($"css_say {text.Remove(0, 1)}");
+            return HookResult.Stop;
+        }
+
+        if (!command.Equals("say_team", StringComparison.OrdinalIgnoreCase)) return HookResult.Continue;
 
         StringBuilder sb = new();
         if (AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))
@@ -448,6 +498,9 @@ public partial class CS2_SimpleAdmin
 
     private void OnMapStart(string mapName)
     {
+        // Results computed for connections of the previous map must not be applied to this one
+        Runtime.Sessions.Clear();
+
         if (Config.OtherSettings.ReloadAdminsEveryMapChange && ServerLoaded && ServerId != null)
             ReloadAdmins(null);
 
@@ -463,6 +516,7 @@ public partial class CS2_SimpleAdmin
         // });
 
         SilentPlayers.Clear();
+        PublishSilentSnapshot();
 
         PlayerPenaltyManager.RemoveAllPenalties();
     }
@@ -505,6 +559,7 @@ public partial class CS2_SimpleAdmin
         if (@event is not { Oldteam: <= 1, Team: >= 1 }) return HookResult.Continue;
         
         SilentPlayers.Remove(player.Slot);
+        PublishSilentSnapshot();
         SimpleAdminApi?.OnAdminToggleSilentEvent(player.Slot, false);
 
         return HookResult.Continue;

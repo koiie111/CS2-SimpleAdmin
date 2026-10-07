@@ -1,858 +1,528 @@
-using System.Collections.Concurrent;
-using CS2_SimpleAdmin.Database;
+using System.Collections.Immutable;
+using System.Data.Common;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Models;
 using Dapper;
 using Microsoft.Extensions.Logging;
-using ZLinq;
 
 namespace CS2_SimpleAdmin.Managers;
 
-internal class CacheManager: IDisposable
+/// <summary>
+/// Bans/IP cache used for connect and periodic ban checks.
+/// <para>
+/// Readers (any thread) read <see cref="Snapshot"/> once per operation and never block.
+/// All changes are serialised by one async writer gate and published as a new immutable
+/// <see cref="BanCacheSnapshot"/> with a single reference write; nothing reachable from a published snapshot is
+/// ever modified. A full rebuild (startup, css_reloadbans) is built next to the current snapshot, which keeps
+/// serving checks until the new one is published.
+/// </para>
+/// <para>
+/// Incremental refresh protocol (every periodic pass):
+/// <list type="number">
+/// <item>Read the DB clock first (<c>dbNow</c>).</item>
+/// <item>Ban rows with <c>updated_at</c>/<c>created</c> &gt;= watermark − overlap, paged by id. Any change of any
+/// cached column (status, SteamID, IP, ends…) is applied; non-ACTIVE rows leave the active set.</item>
+/// <item>Checksum (COUNT, SUM(id)) of ACTIVE rows vs. the new snapshot; a mismatch (deleted rows, SQLite
+/// writers that do not touch updated_at, clock skew) triggers a reconcile of ACTIVE ids.</item>
+/// <item>IP history rows with <c>used_at</c> &gt;= watermark − overlap, keyset-paged on (used_at, steamid, address);
+/// a pass reads at most <see cref="MaxIpPagesPerRefresh"/> pages and continues from the cursor next time.</item>
+/// <item>Publish, then advance the watermarks. Any failure keeps the previous snapshot and watermarks.</item>
+/// </list>
+/// The overlap window re-reads recent rows so commits that become visible late, equal timestamps and coarse
+/// timestamp precision are not skipped; re-applying a row is idempotent.
+/// </para>
+/// </summary>
+internal class CacheManager : IDisposable
 {
-    private readonly ConcurrentDictionary<int, BanRecord> _banCache = [];
-    // Rebuilt into fresh instances and swapped, so unlocked readers on the game thread never see a half-built index
-    private ConcurrentDictionary<ulong, List<BanRecord>> _steamIdIndex = [];
-    private ConcurrentDictionary<uint, List<BanRecord>> _ipIndex = [];
-    private readonly object _indexLock = new();
+    internal const int BanPageSize = 1000;
+    internal const int MaxBanPagesPerRefresh = 50;
+    internal const int IpPageSize = 2000;
+    internal const int MaxIpPagesPerRefresh = 25;
+    internal static readonly TimeSpan Overlap = TimeSpan.FromSeconds(30);
 
-    private readonly ConcurrentDictionary<ulong, HashSet<IpRecord>> _playerIpsCache = [];
-    private HashSet<uint> _cachedIgnoredIps = [];
-    
-    private DateTime _lastUpdateTime = DateTime.MinValue;
-    private DateTime? _lastDatabaseTime = null; // Track actual time from database
-    private bool _isInitialized;
+    private readonly SemaphoreSlim _writer = new(1, 1);
+    private BanCacheSnapshot _snapshot = BanCacheSnapshot.Empty;
     private bool _disposed;
-    
-    /// <summary>
-    /// Initializes and builds the ban and IP cache from the database. Loads bans, player IP history, and config settings.
-    /// </summary>
-    /// <returns>Asynchronous task representing the initialization process.</returns>
-    public async Task InitializeCacheAsync()
+
+    // Writer-owned state (only touched while holding _writer)
+    private DateTime? _banWatermark;
+    private DateTime? _ipWatermark;
+    private IpCursor? _ipCursor;
+    private DateTime? _ipDrainStartedAt;
+    private bool _needsFullRebuild;
+
+    internal readonly record struct IpCursor(DateTime UsedAt, long SteamId, uint Address);
+
+    /// <summary>Current generation. One read per operation; never modified after publication.</summary>
+    public BanCacheSnapshot Snapshot => Volatile.Read(ref _snapshot);
+
+    public bool IsInitialized => Snapshot.IsInitialized;
+
+    private void Publish(BanCacheSnapshot snapshot) => Volatile.Write(ref _snapshot, snapshot);
+
+    // ------------------------------------------------------------------ SQL
+
+    private static string BanColumns =>
+        "id AS Id, player_name AS PlayerName, player_steamid AS PlayerSteamId, player_ip AS PlayerIp, " +
+        "status AS Status, created AS Created, ends AS Ends, duration AS Duration";
+
+    internal static string ActiveBansPageSql(bool multiServer) =>
+        $"SELECT {BanColumns} FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")} AND id > @afterId ORDER BY id LIMIT @limit";
+
+    internal static string ChangedBansPageSql(bool multiServer) =>
+        $"SELECT {BanColumns} FROM sa_bans WHERE (updated_at >= @since OR created >= @since){(multiServer ? "" : " AND server_id = @serverId")} AND id > @afterId ORDER BY id LIMIT @limit";
+
+    internal static string ActiveChecksumSql(bool multiServer) =>
+        $"SELECT COUNT(*) AS Cnt, COALESCE(SUM(id), 0) AS IdSum FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")}";
+
+    internal static string ActiveIdsSql(bool multiServer) =>
+        $"SELECT id FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")}";
+
+    internal static string BansByIdsSql => $"SELECT {BanColumns} FROM sa_bans WHERE id IN @ids";
+
+    internal const string IpHistoryPageSql =
+        "SELECT steamid, name, address, used_at FROM sa_players_ips " +
+        "WHERE used_at > @t OR (used_at = @t AND (steamid > @s OR (steamid = @s AND address > @a))) " +
+        "ORDER BY used_at, steamid, address LIMIT @limit";
+
+    private static async Task<(long Count, long IdSum)> ReadChecksumAsync(DbConnection connection, bool multiServer,
+        int? serverId, CancellationToken ct)
     {
-        if (CS2_SimpleAdmin.DatabaseProvider == null) return;
-        if (!CS2_SimpleAdmin.ServerLoaded) return;
-        if (_isInitialized) return;
-        
+        // Read as objects: MySQL returns BIGINT/DECIMAL, SQLite INTEGER
+        await using var reader = await connection.ExecuteReaderAsync(new CommandDefinition(ActiveChecksumSql(multiServer),
+            new { serverId }, cancellationToken: ct)).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return (0, 0);
+        return (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)));
+    }
+
+    // ------------------------------------------------------------------ full build
+
+    /// <summary>
+    /// Builds the cache from scratch and publishes it. Runs on a DB worker. The previous snapshot keeps serving
+    /// readers until the new one is complete; on failure it stays in place and the exception propagates.
+    /// </summary>
+    public async Task InitializeCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    {
+        if (CS2_SimpleAdmin.DatabaseProvider == null || _disposed) return;
+        await _writer.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            Clear();
-            _cachedIgnoredIps = CS2_SimpleAdmin.Instance.Config.OtherSettings.IgnoredIps
-                .AsValueEnumerable()
-                .Select(IpHelper.IpToUint)
-                .ToHashSet();
+            await BuildAndPublishAsync(config, serverId, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writer.Release();
+        }
+    }
 
-            await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
-            List<BanRecord> bans;
-            
-            if (CS2_SimpleAdmin.Instance.Config.MultiServerMode)
+    /// <summary>css_reloadbans: same as the initial build, serialised with refreshes.</summary>
+    public Task ForceReInitializeCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct) =>
+        InitializeCacheAsync(config, serverId, ct);
+
+    private async Task BuildAndPublishAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    {
+        var start = LatencyHistogram.Now();
+        await using var connection = await CS2_SimpleAdmin.DatabaseProvider!.CreateConnectionAsync(ct).ConfigureAwait(false);
+        var dbNow = await GetDatabaseTimeAsync(connection, ct).ConfigureAwait(false);
+        var multiServer = config.MultiServerMode;
+
+        var bans = new List<BanRecord>();
+        var afterId = 0;
+        while (true)
+        {
+            var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ActiveBansPageSql(multiServer),
+                new { serverId, afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
+            bans.AddRange(page);
+            if (page.Count < BanPageSize) break;
+            afterId = page[^1].Id;
+        }
+
+        var ips = ImmutableDictionary<ulong, ImmutableArray<IpRecord>>.Empty;
+        var accounts = ImmutableDictionary<uint, ImmutableArray<ulong>>.Empty;
+        if (config.OtherSettings.CheckMultiAccountsByIp)
+        {
+            // Keyset pages (async I/O, bounded transient memory) folded into one index builder
+            var builder = new IpIndexBuilder(UnknownName());
+            var cursor = new IpCursor(DateTime.MinValue, -1, 0);
+            while (true)
             {
-                bans = (await connection.QueryAsync<BanRecord>(
-                    """
-                    SELECT 
-                        id AS Id,
-                        player_name AS PlayerName,
-                        player_steamid AS PlayerSteamId,
-                        player_ip AS PlayerIp,
-                        status AS Status 
-                    FROM sa_bans
-                    """)).ToList();
+                var page = (await connection.QueryAsync<IpHistoryRow>(new CommandDefinition(IpHistoryPageSql,
+                    new { t = cursor.UsedAt, s = cursor.SteamId, a = cursor.Address, limit = IpPageSize },
+                    cancellationToken: ct)).ConfigureAwait(false)).AsList();
+                builder.Add(page);
+                if (page.Count < IpPageSize) break;
+                var last = page[^1];
+                cursor = new IpCursor(last.Used_at, last.Steamid, last.Address);
+            }
+
+            (ips, accounts) = builder.Build();
+        }
+
+        var ignored = new List<uint>();
+        foreach (var ip in config.OtherSettings.IgnoredIps)
+            if (IpHelper.TryConvertIpToUint(ip, out var value))
+                ignored.Add(value);
+
+        Publish(BanCacheSnapshot.Create(bans, ips, accounts, ignored));
+        _banWatermark = dbNow;
+        _ipWatermark = dbNow;
+        _ipCursor = null;
+        _ipDrainStartedAt = null;
+        _needsFullRebuild = false;
+        PluginMetrics.CacheFullBuild.RecordSince(start);
+    }
+
+    // ------------------------------------------------------------------ incremental refresh
+
+    /// <summary>Applies database changes since the last successful refresh (see class remarks).</summary>
+    public async Task RefreshCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    {
+        if (CS2_SimpleAdmin.DatabaseProvider == null || _disposed) return;
+        await _writer.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!Snapshot.IsInitialized || _needsFullRebuild || _banWatermark == null)
+            {
+                await BuildAndPublishAsync(config, serverId, ct).ConfigureAwait(false);
+                return;
+            }
+
+            var start = LatencyHistogram.Now();
+            await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false);
+            var dbNow = await GetDatabaseTimeAsync(connection, ct).ConfigureAwait(false);
+            var multiServer = config.MultiServerMode;
+            var snapshot = Snapshot;
+
+            // 1) changed bans, paged by id
+            var since = _banWatermark.Value - Overlap;
+            var changed = new List<BanRecord>();
+            var afterId = 0;
+            for (var pageNo = 0; ; pageNo++)
+            {
+                if (pageNo >= MaxBanPagesPerRefresh)
+                {
+                    // Mass change (import, bulk edit on the site): a bounded full rebuild is cheaper and exact
+                    _needsFullRebuild = true;
+                    RateLimitedLog.Warning("cache.refresh.mass", $"More than {MaxBanPagesPerRefresh * BanPageSize} changed bans; scheduling a full rebuild");
+                    return;
+                }
+
+                var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ChangedBansPageSql(multiServer),
+                    new { since, serverId, afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
+                changed.AddRange(page);
+                if (page.Count < BanPageSize) break;
+                afterId = page[^1].Id;
+            }
+
+            var next = snapshot.WithBans(FilterRealChanges(snapshot, changed));
+
+            // 2) checksum of the ACTIVE set → reconcile deletions / invisible changes
+            var (dbCount, dbIdSum) = await ReadChecksumAsync(connection, multiServer, serverId, ct).ConfigureAwait(false);
+            if (dbCount != next.ActiveCount || dbIdSum != next.ActiveIdSum)
+                next = await ReconcileAsync(connection, next, multiServer, serverId, ct).ConfigureAwait(false);
+
+            // 3) IP history delta
+            var ipDrained = true;
+            DateTime? lastIpUsedAt = null;
+            if (config.OtherSettings.CheckMultiAccountsByIp)
+            {
+                (next, ipDrained, lastIpUsedAt) = await RefreshIpHistoryAsync(connection, next, ct).ConfigureAwait(false);
+            }
+
+            // 4) publish, then advance watermarks
+            Publish(next);
+            _banWatermark = dbNow;
+            if (config.OtherSettings.CheckMultiAccountsByIp)
+            {
+                if (ipDrained)
+                {
+                    // Fully caught up: everything up to the time this drain began has been read
+                    _ipWatermark = _ipDrainStartedAt ?? dbNow;
+                    _ipDrainStartedAt = null;
+                    _ipCursor = null;
+                }
+                else
+                {
+                    _ipDrainStartedAt ??= dbNow;
+                    if (lastIpUsedAt != null) _ipWatermark = lastIpUsedAt;
+                }
             }
             else
             {
-                bans = (await connection.QueryAsync<BanRecord>(
-                    """
-                    SELECT 
-                        id AS Id,
-                        player_name AS PlayerName,
-                        player_steamid AS PlayerSteamId,
-                        player_ip AS PlayerIp,
-                        status AS Status 
-                    FROM sa_bans
-                    WHERE server_id = @serverId
-                    """, new {serverId = CS2_SimpleAdmin.ServerId})).ToList();
+                _ipWatermark = dbNow;
             }
 
-            if (CS2_SimpleAdmin.Instance.Config.OtherSettings.CheckMultiAccountsByIp)
-            {
-                // Optimization: Load IP history and build cache in single pass
-                var ipHistory = await connection.QueryAsync<IpHistoryRow>(
-                    "SELECT steamid, name, address, used_at FROM sa_players_ips ORDER BY steamid, address, used_at DESC");
-
-                var unknownName = CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
-                var currentSteamId = 0UL;
-                var currentIpSet = new HashSet<IpRecord>(new IpRecordComparer());
-                var latestIpTimestamps = new Dictionary<uint, DateTime>();
-
-                foreach (var record in ipHistory)
-                {
-                    // When we encounter a new steamid, save the previous one
-                    if ((ulong)record.Steamid != currentSteamId && currentSteamId != 0)
-                    {
-                        _playerIpsCache[currentSteamId] = currentIpSet;
-                        currentIpSet = new HashSet<IpRecord>(new IpRecordComparer());
-                        latestIpTimestamps.Clear();
-                    }
-
-                    currentSteamId = (ulong)record.Steamid;
-
-                    // Only keep the latest timestamp for each IP
-                    if (!latestIpTimestamps.TryGetValue(record.Address, out var existingTimestamp) ||
-                        record.Used_at > existingTimestamp)
-                    {
-                        latestIpTimestamps[record.Address] = record.Used_at;
-                        currentIpSet.Add(new IpRecord(
-                            record.Address,
-                            record.Used_at,
-                            string.IsNullOrEmpty(record.Name) ? unknownName : record.Name
-                        ));
-                    }
-                }
-
-                // Don't forget the last steamid
-                if (currentSteamId != 0)
-                {
-                    _playerIpsCache[currentSteamId] = currentIpSet;
-                }
-            }
-
-            foreach (var ban in bans.AsValueEnumerable())
-                _banCache.TryAdd(ban.Id, ban);
-            
-            RebuildIndexes();
-            
-            _lastUpdateTime = Time.ActualDateTime().AddSeconds(-1);
-            _isInitialized = true;
+            PluginMetrics.CacheRefresh.RecordSince(start);
         }
-        catch (Exception e)
+        finally
         {
-            Console.WriteLine(e.ToString());
+            _writer.Release();
         }
     }
-    
-    /// <summary>
-    /// Clears all cached data and reinitializes the cache from the database.
-    /// </summary>
-    /// <returns>Asynchronous task representing the reinitialization process.</returns>
-    public async Task ForceReInitializeCacheAsync()
-    {
-        _isInitialized = false;
-        
-        _banCache.Clear();
-        _playerIpsCache.Clear();
-        _cachedIgnoredIps = [];
-        _lastUpdateTime = DateTime.MinValue;
-        
-        await InitializeCacheAsync();
-    }
-    
-    /// <summary>
-    /// Refreshes the in-memory cache with updated or new data from the database since the last update time.
-    /// Also updates multi-account IP history if enabled.
-    /// </summary>
-    /// <returns>Asynchronous task representing the refresh operation.</returns>
-    public async Task RefreshCacheAsync()
-    {
-        if (CS2_SimpleAdmin.DatabaseProvider == null) return;
-        if (!_isInitialized) return;
 
+    /// <summary>Rows whose cached columns actually differ (or that enter/leave the active set).</summary>
+    private static IEnumerable<BanRecord> FilterRealChanges(BanCacheSnapshot snapshot, List<BanRecord> rows)
+    {
+        foreach (var row in rows)
+        {
+            var active = row.StatusEnum == BanStatus.ACTIVE;
+            if (snapshot.ActiveBans.TryGetValue(row.Id, out var cached))
+            {
+                if (!active || cached != row) yield return row; // record equality covers SteamID/IP/name/ends/duration
+            }
+            else if (active)
+            {
+                yield return row;
+            }
+        }
+    }
+
+    private async Task<BanCacheSnapshot> ReconcileAsync(DbConnection connection, BanCacheSnapshot next, bool multiServer,
+        int? serverId, CancellationToken ct)
+    {
+        Interlocked.Increment(ref PluginMetrics.CacheReconciles);
+        var dbIds = (await connection.QueryAsync<int>(new CommandDefinition(ActiveIdsSql(multiServer), new { serverId },
+            cancellationToken: ct)).ConfigureAwait(false)).ToHashSet();
+
+        var removed = new List<int>();
+        foreach (var id in next.ActiveBans.Keys)
+            if (!dbIds.Contains(id)) removed.Add(id);
+
+        var missing = new List<int>();
+        foreach (var id in dbIds)
+            if (!next.ActiveBans.ContainsKey(id)) missing.Add(id);
+
+        var added = new List<BanRecord>();
+        for (var i = 0; i < missing.Count; i += 500)
+        {
+            var batch = missing.GetRange(i, Math.Min(500, missing.Count - i));
+            added.AddRange(await connection.QueryAsync<BanRecord>(new CommandDefinition(BansByIdsSql, new { ids = batch },
+                cancellationToken: ct)).ConfigureAwait(false));
+        }
+
+        return next.WithBans(added, removed);
+    }
+
+    private async Task<(BanCacheSnapshot, bool Drained, DateTime? LastUsedAt)> RefreshIpHistoryAsync(DbConnection connection,
+        BanCacheSnapshot next, CancellationToken ct)
+    {
+        // Continue strictly after the cursor of an unfinished drain; otherwise start at watermark − overlap.
+        var cursor = _ipCursor ?? new IpCursor((_ipWatermark ?? DateTime.MinValue) - Overlap, -1, 0);
+        var unknown = UnknownName();
+        DateTime? lastUsedAt = null;
+        for (var pageNo = 0; pageNo < MaxIpPagesPerRefresh; pageNo++)
+        {
+            var page = (await connection.QueryAsync<IpHistoryRow>(new CommandDefinition(IpHistoryPageSql,
+                new { t = cursor.UsedAt, s = cursor.SteamId, a = cursor.Address, limit = IpPageSize },
+                cancellationToken: ct)).ConfigureAwait(false)).AsList();
+            if (page.Count > 0)
+            {
+                next = next.WithIpHistory(page, unknown);
+                var last = page[^1];
+                cursor = new IpCursor(last.Used_at, last.Steamid, last.Address);
+                lastUsedAt = last.Used_at;
+            }
+
+            if (page.Count < IpPageSize)
+            {
+                _ipCursor = null;
+                return (next, true, lastUsedAt);
+            }
+        }
+
+        _ipCursor = cursor;
+        return (next, false, lastUsedAt);
+    }
+
+    private static async Task<DateTime> GetDatabaseTimeAsync(DbConnection connection, CancellationToken ct)
+    {
+        // CURRENT_TIMESTAMP is in the session time zone on MySQL and UTC on SQLite – the same clocks
+        // updated_at/used_at are written with. SQLite returns text, so convert explicitly.
+        var value = await connection.ExecuteScalarAsync<object>(new CommandDefinition("SELECT CURRENT_TIMESTAMP",
+            cancellationToken: ct)).ConfigureAwait(false);
+        return PlayerManager.ToDateTime(value) ?? throw new InvalidOperationException($"Unexpected CURRENT_TIMESTAMP value '{value}'");
+    }
+
+    private static string UnknownName() => CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+
+    // ------------------------------------------------------------------ immediate updates
+
+    /// <summary>
+    /// Applies an unban immediately (the periodic refresh would otherwise keep rejecting the player for up to a
+    /// minute). Serialised with refreshes; publishes a new snapshot.
+    /// </summary>
+    public async Task SetBanStatusAsync(IEnumerable<int> banIds, BanStatus status, CancellationToken ct = default)
+    {
+        await _writer.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
-            IEnumerable<BanRecord> updatedBans;
-
-            // Get current time from database in local timezone (CURRENT_TIMESTAMP uses session timezone, not UTC)
-            var currentDatabaseTime = await connection.QueryFirstAsync<DateTime>("SELECT CURRENT_TIMESTAMP");
-
-            // Optimization: Only get IDs for comparison if we need to check for deletions
-            // Most of the time bans are just added/updated, not deleted
-            HashSet<int>? allIds = null;
-
-            if (CS2_SimpleAdmin.Instance.Config.MultiServerMode)
-            {
-                // Use previous database time or start from far past if first run
-                var lastCheckTime = _lastDatabaseTime ?? DateTime.MinValue;
-
-                // Get recently updated bans by timestamp (using database time to avoid timezone issues)
-                var updatedBans_Query = (await connection.QueryAsync<BanRecord>(
-                    """
-                    SELECT id AS Id,
-                    player_name AS PlayerName,
-                    player_steamid AS PlayerSteamId,
-                    player_ip AS PlayerIp,
-                    status AS Status
-                    FROM `sa_bans` WHERE updated_at >= @lastUpdate OR created >= @lastUpdate ORDER BY updated_at DESC
-                    """,
-                    new { lastUpdate = lastCheckTime }
-                )).ToList();
-
-                // Detect changes: new bans or status changes
-                var updatedList = new List<BanRecord>();
-                foreach (var ban in updatedBans_Query)
-                {
-                    if (!_banCache.TryGetValue(ban.Id, out var cachedBan))
-                    {
-                        // New ban
-                        updatedList.Add(ban);
-                    }
-                    else if (cachedBan.Status != ban.Status)
-                    {
-                        // Status changed
-                        updatedList.Add(ban);
-                    }
-                }
-
-                if (updatedList.Count > 0)
-                {
-                    allIds = (await connection.QueryAsync<int>("SELECT id FROM sa_bans")).ToHashSet();
-                }
-                updatedBans = updatedList;
-
-                // Update last check time to current database time
-                _lastDatabaseTime = currentDatabaseTime;
-            }
-            else
-            {
-                // Use previous database time or start from far past if first run
-                var lastCheckTime = _lastDatabaseTime ?? DateTime.MinValue;
-
-                // Get recently updated bans for this server by timestamp (using database time to avoid timezone issues)
-                var updatedBans_Query = (await connection.QueryAsync<BanRecord>(
-                    """
-                    SELECT id AS Id,
-                    player_name AS PlayerName,
-                    player_steamid AS PlayerSteamId,
-                    player_ip AS PlayerIp,
-                    status AS Status
-                    FROM `sa_bans` WHERE server_id = @serverId AND (updated_at >= @lastUpdate OR created >= @lastUpdate) ORDER BY updated_at DESC
-                    """,
-                    new { serverId = CS2_SimpleAdmin.ServerId, lastUpdate = lastCheckTime }
-                )).ToList();
-
-                // Detect changes: new bans or status changes
-                var updatedList = new List<BanRecord>();
-                foreach (var ban in updatedBans_Query)
-                {
-                    if (!_banCache.TryGetValue(ban.Id, out var cachedBan))
-                    {
-                        // New ban
-                        updatedList.Add(ban);
-                    }
-                    else if (cachedBan.Status != ban.Status)
-                    {
-                        // Status changed
-                        updatedList.Add(ban);
-                    }
-                }
-
-                if (updatedList.Count > 0)
-                {
-                    allIds = (await connection.QueryAsync<int>(
-                        "SELECT id FROM sa_bans WHERE server_id = @serverId",
-                        new { serverId = CS2_SimpleAdmin.ServerId }
-                    )).ToHashSet();
-                }
-                updatedBans = updatedList;
-
-                // Update last check time to current database time
-                _lastDatabaseTime = currentDatabaseTime;
-            }
-
-            // Optimization: Only process deletions if we have the full ID list
-            if (allIds != null)
-            {
-                foreach (var id in _banCache.Keys)
-                {
-                    if (allIds.Contains(id) || !_banCache.TryRemove(id, out var ban)) continue;
-
-                    if (ban.PlayerSteamId != null &&
-                        _steamIdIndex.TryGetValue(ban.PlayerSteamId.Value, out var steamBans))
-                    {
-                        steamBans.RemoveAll(b => b.Id == id);
-                        if (steamBans.Count == 0)
-                            _steamIdIndex.TryRemove(ban.PlayerSteamId.Value, out _);
-                    }
-
-                    if (string.IsNullOrWhiteSpace(ban.PlayerIp) ||
-                        !IpHelper.TryConvertIpToUint(ban.PlayerIp, out var ipUInt) ||
-                        !_ipIndex.TryGetValue(ipUInt, out var ipBans))
-                        continue;
-
-                    ipBans.RemoveAll(b => b.Id == id);
-                    if (ipBans.Count == 0)
-                        _ipIndex.TryRemove(ipUInt, out _);
-                }
-            }
-            
-            if (CS2_SimpleAdmin.Instance.Config.OtherSettings.CheckMultiAccountsByIp)
-            {
-                var ipHistory = (await connection.QueryAsync<IpHistoryRow>(
-                    "SELECT steamid, name, address, used_at FROM sa_players_ips WHERE used_at >= @lastUpdate ORDER BY used_at DESC LIMIT 300",
-                    new { lastUpdate = _lastUpdateTime }));
-
-                foreach (var group in ipHistory.AsValueEnumerable().GroupBy(x => x.Steamid))
-                {
-                    var ipSet = new HashSet<IpRecord>(
-                        group
-                            .GroupBy(x => x.Address)
-                            .Select(g =>
-                            {
-                                var latest = g.MaxBy(x => x.Used_at)!; // group is never empty
-                                return new IpRecord(
-                                    g.Key,
-                                    latest.Used_at,
-                                    !string.IsNullOrEmpty(latest.Name)
-                                        ? latest.Name
-                                        : CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown"
-                                );
-                            }),
-                        new IpRecordComparer()
-                    );
-
-                    _playerIpsCache.AddOrUpdate(
-                        (ulong)group.Key,
-                        _ => ipSet,
-                        (_, existingSet) =>
-                        {
-                            foreach (var newEntry in ipSet)
-                            {
-                                existingSet.Remove(newEntry);
-                                existingSet.Add(newEntry);
-                            }
-
-                            return existingSet;
-                        });
-                }
-            }
-
-            // Update cache with new/modified bans
-            var needsRebuild = false;
-            foreach (var ban in updatedBans)
-            {
-                if (_banCache.TryGetValue(ban.Id, out var oldBan) && oldBan.Status != ban.Status)
-                {
-                    // Ban status changed (e.g., ACTIVE -> EXPIRED/UNBANNED), need to rebuild indexes
-                    needsRebuild = true;
-                }
-                _banCache.AddOrUpdate(ban.Id, ban, (_, _) => ban);
-            }
-
-            // Rebuild indexes if there were updates or status changes
-            if (updatedBans.Any() || needsRebuild)
-            {
-                RebuildIndexes();
-            }
-
-            _lastUpdateTime = Time.ActualDateTime().AddSeconds(-1);
+            var snapshot = Snapshot;
+            var changes = new List<BanRecord>();
+            foreach (var id in banIds)
+                if (snapshot.ActiveBans.TryGetValue(id, out var ban) && ban.StatusEnum != status)
+                    changes.Add(ban with { Status = status.ToString() });
+            if (changes.Count > 0) Publish(snapshot.WithBans(changes));
         }
-        catch (Exception)
+        finally
         {
+            _writer.Release();
         }
     }
 
-    /// <summary>
-    /// Rebuilds the internal indexes for fast lookup of active bans by Steam ID and IP address.
-    /// Clears and repopulates both indexes based on the current in-memory ban cache.
-    /// </summary>
-    private void RebuildIndexes()
+    /// <summary>Adds a ban that was just written by this server, so a reconnect is rejected before the next refresh.</summary>
+    public async Task AddOrUpdateBanAsync(BanRecord ban, CancellationToken ct = default)
     {
-        // SetBanStatus (unban thread) and RefreshCacheAsync (timer thread) can both get here
-        lock (_indexLock)
+        await _writer.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            RebuildIndexesCore();
+            if (Snapshot.IsInitialized) Publish(Snapshot.WithBans([ban]));
+        }
+        finally
+        {
+            _writer.Release();
         }
     }
 
-    /// <summary>
-    /// Updates the status of the given bans in the cache and rebuilds the indexes,
-    /// so unbans take effect immediately instead of waiting for the next refresh.
-    /// </summary>
-    /// <param name="banIds">Ban ids to update.</param>
-    /// <param name="status">New status.</param>
-    public void SetBanStatus(IEnumerable<int> banIds, BanStatus status)
+    // ------------------------------------------------------------------ lookups (any thread, no waiting)
+
+    /// <summary>Active bans of a SteamID (a copy). Not a history count: use the DB for totals.</summary>
+    public List<BanRecord> GetPlayerBansBySteamId(ulong steamId) =>
+        Snapshot.BySteamId.TryGetValue(steamId, out var bans) ? [..bans] : [];
+
+    public List<BanRecord> GetActiveBans() => [..Snapshot.ActiveBans.Values];
+
+    public List<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(string ipAddress) =>
+        IpHelper.TryConvertIpToUint(ipAddress, out var ip) ? [..Snapshot.GetAccountsByIp(ip)] : [];
+
+    public bool HasIpForPlayer(ulong steamId, string ipAddress)
     {
-        var changed = false;
-        foreach (var id in banIds)
-        {
-            if (!_banCache.TryGetValue(id, out var ban) || ban.StatusEnum == status) continue;
-            _banCache[id] = ban with { Status = status.ToString() };
-            changed = true;
-        }
-
-        if (changed) RebuildIndexes();
-    }
-
-    private void RebuildIndexesCore()
-    {
-        var steamIdIndex = new ConcurrentDictionary<ulong, List<BanRecord>>();
-        var ipIndex = new ConcurrentDictionary<uint, List<BanRecord>>();
-
-        // Optimization: Cache config value to avoid repeated property access
-        var banType = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType;
-        var checkIpBans = banType != 0;
-
-        // Optimization: Pre-filter only ACTIVE bans to avoid checking status in loop
-        var activeBans = _banCache.Values.Where(b => b.StatusEnum == BanStatus.ACTIVE);
-
-        foreach (var ban in activeBans)
-        {
-            // Index by Steam ID
-            if (ban.PlayerSteamId.HasValue)
-            {
-                var steamId = ban.PlayerSteamId.Value;
-                if (!steamIdIndex.TryGetValue(steamId, out var steamList))
-                {
-                    steamList = new List<BanRecord>();
-                    steamIdIndex[steamId] = steamList;
-                }
-                steamList.Add(ban);
-            }
-
-            // Index by IP (only if IP bans are enabled)
-            if (checkIpBans && !string.IsNullOrEmpty(ban.PlayerIp) &&
-                IpHelper.TryConvertIpToUint(ban.PlayerIp, out var ipUInt))
-            {
-                if (!ipIndex.TryGetValue(ipUInt, out var ipList))
-                {
-                    ipList = new List<BanRecord>();
-                    ipIndex[ipUInt] = ipList;
-                }
-                ipList.Add(ban);
-            }
-        }
-
-        // Reference swap is atomic; readers finish on the old index or start on the complete new one
-        Volatile.Write(ref _steamIdIndex, steamIdIndex);
-        Volatile.Write(ref _ipIndex, ipIndex);
-    }
-    
-    /// <summary>
-    /// Retrieves all ban records currently stored in the cache.
-    /// </summary>
-    /// <returns>List of all <see cref="BanRecord"/> objects.</returns>
-    public List<BanRecord> GetAllBans() => _banCache.Values.ToList();
-    
-    /// <summary>
-    /// Retrieves only active ban records from the cache.
-    /// </summary>
-    /// <returns>List of active <see cref="BanRecord"/> objects.</returns>
-    public List<BanRecord> GetActiveBans() => _banCache.Values.Where(b => b.StatusEnum == BanStatus.ACTIVE).ToList();
-    
-    /// <summary>
-    /// Retrieves all ban records for a specific player by their Steam ID.
-    /// </summary>
-    /// <param name="steamId">64-bit Steam ID of the player.</param>
-    /// <returns>List of <see cref="BanRecord"/> objects associated with the Steam ID.</returns>
-    public List<BanRecord> GetPlayerBansBySteamId(ulong steamId) => _steamIdIndex.TryGetValue(steamId, out var bans) ? bans : [];
-    
-    /// <summary>
-    /// Gets all known Steam accounts that have used the specified IP address.
-    /// </summary>
-    /// <param name="ipAddress">The IP address to search for, in string format.</param>
-    /// <returns>
-    /// List of tuples containing the Steam ID, last used time, and player name for each matching entry.
-    /// </returns>
-    public List<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(string ipAddress)
-    {
-        var ipAsUint = IpHelper.IpToUint(ipAddress);
-        var results = new List<(ulong, DateTime, string)>();
-
-        // Optimization: Direct lookup using HashSet.Contains instead of TryGetValue
-        var searchRecord = new IpRecord(ipAsUint, default, null!);
-
-        foreach (var (steamId, ipSet) in _playerIpsCache)
-        {
-            // Optimization: Single pass through the set
-            foreach (var entry in ipSet)
-            {
-                if (entry.Ip == ipAsUint)
-                {
-                    results.Add((steamId, entry.UsedAt, entry.PlayerName));
-                }
-            }
-        }
-
-        return results;
-    }
-
-    // public IEnumerable<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(string ipAddress)
-    // {
-    //     var ipAsUint = IpHelper.IpToUint(ipAddress);
-    //
-    //     return _playerIpsCache.SelectMany(kvp => kvp.Value
-    //         .Where(entry => entry.Ip == ipAsUint)
-    //         .Select(entry => (kvp.Key, entry.UsedAt, entry.PlayerName)));
-    // }
-
-    private bool IsIpBanned(string ipAddress)
-    {
-        if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0) return false;
-        var ipUInt = IpHelper.IpToUint(ipAddress);
-        return !_cachedIgnoredIps.Contains(ipUInt) && _ipIndex.ContainsKey(ipUInt);
-    }
-    
-    // public bool IsPlayerBanned(ulong? steamId, string? ipAddress)
-    // {
-    //     if (steamId != null && _steamIdIndex.ContainsKey(steamId.Value))
-    //         return true;
-    //     
-    //     if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0)
-    //         return false;
-    //
-    //     if (string.IsNullOrEmpty(ipAddress) || !IpHelper.TryConvertIpToUint(ipAddress, out var ipUInt))
-    //         return false;
-    //
-    //     return !_cachedIgnoredIps.Contains(ipUInt) && _ipIndex.ContainsKey(ipUInt);
-    // }
-
-    /// <summary>
-    /// Checks if a player is currently banned by Steam ID or IP address.
-    /// If a partial ban record is found, updates it with the latest player information.
-    /// </summary>
-    /// <param name="playerName">Name of the player attempting to connect.</param>
-    /// <param name="steamId">Optional 64-bit Steam ID of the player.</param>
-    /// <param name="ipAddress">Optional IP address of the player.</param>
-    /// <returns>True if the player is banned, otherwise false.</returns>
-    public bool IsPlayerBanned(string playerName, ulong? steamId, string? ipAddress)
-    {
-        BanRecord? record;
-        if (steamId.HasValue && _steamIdIndex.TryGetValue(steamId.Value, out var steamRecords))
-        {
-            record = steamRecords.FirstOrDefault(r => r.StatusEnum == BanStatus.ACTIVE);
-            if (record != null)
-            {
-                // Double-check the ban is still active in cache (handle race conditions)
-                if (_banCache.TryGetValue(record.Id, out var cachedBan) && cachedBan.StatusEnum == BanStatus.ACTIVE)
-                {
-                    if ((string.IsNullOrEmpty(record.PlayerIp) && !string.IsNullOrEmpty(ipAddress)) ||
-                        (!record.PlayerSteamId.HasValue))
-                    {
-                        _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-                    }
-
-                    return true;
-                }
-            }
-        }
-        
-        if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0 || string.IsNullOrEmpty(ipAddress))
-            return false;
-
-        if (string.IsNullOrEmpty(ipAddress) ||
-            !IpHelper.TryConvertIpToUint(ipAddress, out var ipUInt) ||
-            _cachedIgnoredIps.Contains(ipUInt) ||
-            !_ipIndex.TryGetValue(ipUInt, out var ipRecords)) return false;
-
-        record = ipRecords.FirstOrDefault(r => r.StatusEnum == BanStatus.ACTIVE);
-        if (record == null) return false;
-
-        // Double-check the ban is still active in cache (handle race conditions)
-        if (!_banCache.TryGetValue(record.Id, out var cachedBanIp) || cachedBanIp.StatusEnum != BanStatus.ACTIVE)
-            return false;
-
-        if ((string.IsNullOrEmpty(record.PlayerIp) && !string.IsNullOrEmpty(ipAddress)) ||
-            (!record.PlayerSteamId.HasValue && steamId.HasValue))
-        {
-            _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-        }
-
-        return true;
-    }
-    
-    // public bool IsPlayerOrAnyIpBanned(ulong steamId, string? ipAddress)
-    // {
-    //     if (_steamIdIndex.ContainsKey(steamId))
-    //         return true;
-    //     
-    //     if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0)
-    //         return false;
-    //
-    //     if (!_playerIpsCache.TryGetValue(steamId, out var ipData))
-    //         return false;
-    //
-    //     // var now = Time.ActualDateTime();
-    //     var cutoff = Time.ActualDateTime().AddDays(-CS2_SimpleAdmin.Instance.Config.OtherSettings.ExpireOldIpBans);
-    //     var unknownName = CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
-    //     
-    //     if (ipAddress != null && IpHelper.TryConvertIpToUint(ipAddress, out var ipAsUint))
-    //     {
-    //         if (!_cachedIgnoredIps.Contains(ipAsUint))
-    //         {
-    //             ipData.Add(new IpRecord(
-    //                 ipAsUint,
-    //                 Time.ActualDateTime().AddSeconds(-2),
-    //                 unknownName
-    //             ));
-    //         }
-    //     }
-    //     
-    //     // foreach (var ipRecord in ipData)
-    //     // {
-    //     //     // Skip if too old or in ignored list
-    //     //     if (ipRecord.UsedAt < cutoff || _cachedIgnoredIps.Contains(ipRecord.Ip))
-    //     //         continue;
-    //     //
-    //     //     // Check if IP is banned
-    //     //     if (_ipIndex.ContainsKey(ipRecord.Ip))
-    //     //         return true;
-    //     // }
-    //
-    //     foreach (var ipRecord in ipData)
-    //     {
-    //         if (ipRecord.UsedAt < cutoff || _cachedIgnoredIps.Contains(ipRecord.Ip))
-    //             continue;
-    //
-    //         if (!_ipIndex.TryGetValue(ipRecord.Ip, out var banRecords)) continue;
-    //         
-    //         var activeBan = banRecords.FirstOrDefault(r => r.StatusEnum == BanStatus.ACTIVE);
-    //         if (activeBan == null) continue;
-    //         
-    //         if (!string.IsNullOrEmpty(activeBan.PlayerName) && activeBan.PlayerSteamId.HasValue) return true;
-    //                 
-    //         _ = Task.Run(() => UpdatePlayerData(
-    //             activeBan.PlayerName,
-    //             steamId,
-    //             ipAddress
-    //         ));
-    //
-    //         if (string.IsNullOrEmpty(activeBan.PlayerName) && !string.IsNullOrEmpty(unknownName))
-    //             activeBan.PlayerName = unknownName;
-    //         
-    //         activeBan.PlayerSteamId ??= steamId;
-    //
-    //         return true;
-    //     }
-    //
-    //     return false;
-    // }
-
-    /// <summary>
-    /// Checks if the player or any IP previously associated with them is currently banned.
-    /// Also updates ban records with missing player info if found.
-    /// </summary>
-    /// <param name="playerName">Current player name.</param>
-    /// <param name="steamId">64-bit Steam ID of the player.</param>
-    /// <param name="ipAddress">Current IP address of the player (optional).</param>
-    /// <returns>True if the player or their known IPs are banned, otherwise false.</returns>
-    public bool IsPlayerOrAnyIpBanned(string playerName, ulong steamId, string? ipAddress)
-    {
-        if (_steamIdIndex.TryGetValue(steamId, out var steamBans))
-        {
-            var activeBan = steamBans.FirstOrDefault(b => b.StatusEnum == BanStatus.ACTIVE);
-            if (activeBan != null)
-            {
-                // Double-check the ban is still active in cache (handle race conditions)
-                if (_banCache.TryGetValue(activeBan.Id, out var cachedBan) && cachedBan.StatusEnum == BanStatus.ACTIVE)
-                {
-                    if (string.IsNullOrEmpty(activeBan.PlayerName) || string.IsNullOrEmpty(activeBan.PlayerIp) && !string.IsNullOrEmpty(ipAddress))
-                        _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-
-                    return true;
-                }
-            }
-        }
-
-        if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0 || string.IsNullOrEmpty(ipAddress))
-            return false;
-
-        if (!IpHelper.TryConvertIpToUint(ipAddress, out var ipUInt))
-            return false;
-
-        if (_cachedIgnoredIps.Contains(ipUInt))
-            return false;
-
-        // Direct ip ban (ban record has player_ip set)
-        if (_ipIndex.TryGetValue(ipUInt, out var ipBanRecords))
-        {
-            var ipBan = ipBanRecords.FirstOrDefault(r => r.StatusEnum == BanStatus.ACTIVE);
-            if (ipBan != null && _banCache.TryGetValue(ipBan.Id, out var cachedIpBan) && cachedIpBan.StatusEnum == BanStatus.ACTIVE)
-            {
-                var expireOldIpBans = CS2_SimpleAdmin.Instance.Config.OtherSettings.ExpireOldIpBans;
-                if (expireOldIpBans <= 0 || ipBan.Created >= Time.ActualDateTime().AddDays(-expireOldIpBans))
-                {
-                    if (string.IsNullOrEmpty(ipBan.PlayerName))
-                        ipBan.PlayerName = playerName;
-                    ipBan.PlayerSteamId ??= steamId;
-                    _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-                    return true;
-                }
-            }
-        }
-
-        // Multiaccount ban - check if other accounts using current ip are banned
-        if (!_playerIpsCache.IsEmpty)
-        {
-            foreach (var (otherSteamId, ipSet) in _playerIpsCache)
-            {
-                // Skip current player
-                if (otherSteamId == steamId)
-                    continue;
-
-                // Check if this ip is in the other accounts ip history
-                if (ipSet.All(record => record.Ip != ipUInt)) continue;
-                // Found another account using this ip - check if its banned
-                if (!_steamIdIndex.TryGetValue(otherSteamId, out var otherSteamBans)) continue;
-                var activeBan = otherSteamBans.FirstOrDefault(b => b.StatusEnum == BanStatus.ACTIVE);
-                if (activeBan == null || !_banCache.TryGetValue(activeBan.Id, out var cachedBan) ||
-                    cachedBan.StatusEnum != BanStatus.ACTIVE) continue;
-                _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-                return true;
-            }
-        }
-
-        // Multiaccount ban - check if this player used any ip where other banned accounts are connected
-        // Search sa_players_ips for all accounts sharing the same ips as current player
-        if (!CS2_SimpleAdmin.Instance.Config.OtherSettings.CheckMultiAccountsByIp)
-            return false;
-
-        if (!_playerIpsCache.TryGetValue(steamId, out var playerIps))
-            return false;
-
-        // For each ip the player used (current or historical)
-        foreach (var playerIpRecord in playerIps)
-        {
-            // Search sa_players_ips for other accounts using this same ip (as uint)
-            foreach (var (otherSteamId, otherIpSet) in _playerIpsCache)
-            {
-                if (otherSteamId == steamId)
-                    continue;
-
-                // Check if this other account used the player ip
-                if (otherIpSet.All(record => record.Ip != playerIpRecord.Ip))
-                    continue;
-
-                // Check if this other account is banned
-                if (!_steamIdIndex.TryGetValue(otherSteamId, out var otherSteamBans))
-                    continue;
-
-                var activeBan = otherSteamBans.FirstOrDefault(b => b.StatusEnum == BanStatus.ACTIVE);
-                if (activeBan == null || !_banCache.TryGetValue(activeBan.Id, out var cachedBan) ||
-                    cachedBan.StatusEnum != BanStatus.ACTIVE)
-                    continue;
-
-                _ = Task.Run(() => UpdatePlayerData(playerName, steamId, ipAddress));
-                return true;
-            }
-        }
-
+        if (string.IsNullOrWhiteSpace(ipAddress) || !IpHelper.TryConvertIpToUint(ipAddress, out var ip)) return false;
+        if (!Snapshot.IpsBySteamId.TryGetValue(steamId, out var records)) return false;
+        foreach (var r in records)
+            if (r.Ip == ip) return true;
         return false;
     }
 
     /// <summary>
-    /// Checks if the given IP address is known (previously recorded) for the specified Steam ID.
+    /// Ban check for a connecting/online player against one snapshot. Also returns whether the matched ban row is
+    /// missing the player's IP/SteamID/name (the caller then queues <see cref="UpdatePlayerDataAsync"/>, as before).
     /// </summary>
-    /// <param name="steamId">64-bit Steam ID of the player.</param>
-    /// <param name="ipAddress">IP address to check.</param>
-    /// <returns>True if the IP is recorded for the player, otherwise false.</returns>
-    public bool HasIpForPlayer(ulong steamId, string ipAddress)
+    public BanCheckResult CheckBan(CS2_SimpleAdminConfig config, ulong steamId, string? ipAddress, DateTime now)
     {
-        if (string.IsNullOrWhiteSpace(ipAddress))
-            return false;
-        
-        if (!IpHelper.TryConvertIpToUint(ipAddress, out var ipUint))
-            return false;
-
-        return _playerIpsCache.TryGetValue(steamId, out var ipData) && 
-               ipData.Contains(new IpRecord(ipUint, default, null!));
+        var other = config.OtherSettings;
+        var snapshot = Snapshot;
+        return other.BanType switch
+        {
+            0 => snapshot.CheckPlayer(steamId, null, 0, other.ExpireOldIpBans, now),
+            _ => other.CheckMultiAccountsByIp
+                ? snapshot.CheckPlayerOrAnyIp(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, true, now)
+                : snapshot.CheckPlayer(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, now)
+        };
     }
-    
-    // public bool HasIpForPlayer(ulong steamId, string ipAddress)
-    // {
-    //     if (string.IsNullOrWhiteSpace(ipAddress))
-    //         return false;
-    //
-    //     return _playerIpsCache.TryGetValue(steamId, out var ipData) 
-    //            && ipData.Any(x => x.Ip == IpHelper.IpToUint(ipAddress));
-    // }
+
+    /// <summary>Same conditions as the original code for back-filling ban rows with the player's data.</summary>
+    internal static bool NeedsPlayerDataUpdate(BanCheckResult result, bool multiAccountPath, string? ipAddress)
+    {
+        if (!result.IsBanned || result.Ban == null) return false;
+        var ban = result.Ban;
+        return result.Match switch
+        {
+            BanMatch.SteamId when multiAccountPath => string.IsNullOrEmpty(ban.PlayerName) ||
+                                                    string.IsNullOrEmpty(ban.PlayerIp) && !string.IsNullOrEmpty(ipAddress),
+            BanMatch.SteamId => string.IsNullOrEmpty(ban.PlayerIp) && !string.IsNullOrEmpty(ipAddress) || !ban.PlayerSteamId.HasValue,
+            BanMatch.Ip when multiAccountPath => true,
+            BanMatch.Ip => string.IsNullOrEmpty(ban.PlayerIp) || !ban.PlayerSteamId.HasValue,
+            BanMatch.SharedIp or BanMatch.SharedIpHistory => true,
+            _ => false
+        };
+    }
 
     /// <summary>
-    /// Updates existing active ban records in the database with the latest known player name and IP address.
-    /// Also updates in-memory cache to reflect these changes.
+    /// Fills missing player_ip/player_name on the player's active ban rows in the database (DB worker), then
+    /// mirrors the change into a new snapshot (no in-place mutation of cached records).
     /// </summary>
-    /// <param name="playerName">Current player name.</param>
-    /// <param name="steamId">Optional Steam ID of the player.</param>
-    /// <param name="ipAddress">Optional IP address of the player.</param>
-    /// <returns>Asynchronous task representing the update operation.</returns>
-    private async Task UpdatePlayerData(string? playerName, ulong? steamId, string? ipAddress)
+    public async Task UpdatePlayerDataAsync(CS2_SimpleAdminConfig config, int? serverId, string? playerName, ulong? steamId,
+        string? ipAddress, CancellationToken ct)
     {
-        if (CS2_SimpleAdmin.DatabaseProvider == null)
-            return;
+        if (CS2_SimpleAdmin.DatabaseProvider == null) return;
 
         var baseSql = """
                           UPDATE sa_bans
-                          SET 
+                          SET
                               player_ip = COALESCE(player_ip, @PlayerIP),
                               player_name = COALESCE(player_name, @PlayerName)
-                          WHERE 
+                          WHERE
                               (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP)
                               AND status = 'ACTIVE'
                               AND (duration = 0 OR ends > @CurrentTime)
                       """;
 
-        if (!CS2_SimpleAdmin.Instance.Config.MultiServerMode)
-        {
+        if (!config.MultiServerMode)
             baseSql += " AND server_id = @ServerId;";
-        }
 
+        var other = config.OtherSettings;
+        var playerIp = other.BanType == 0 || string.IsNullOrEmpty(ipAddress) || other.IgnoredIps.Contains(ipAddress)
+            ? null
+            : ipAddress;
         var parameters = new
         {
             PlayerSteamID = steamId,
-            PlayerIP = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0
-                       || string.IsNullOrEmpty(ipAddress)
-                       || CS2_SimpleAdmin.Instance.Config.OtherSettings.IgnoredIps.Contains(ipAddress)
-                ? null
-                : ipAddress,
+            PlayerIP = playerIp,
             PlayerName = string.IsNullOrEmpty(playerName) ? string.Empty : playerName,
             CurrentTime = Time.ActualDateTime(),
-            CS2_SimpleAdmin.ServerId
+            ServerId = serverId
         };
-        
-        await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
-        await connection.ExecuteAsync(baseSql, parameters);
-        
-        if (steamId.HasValue && _steamIdIndex.TryGetValue(steamId.Value, out var steamRecords))
-        {
-            foreach (var rec in steamRecords.Where(r => r.StatusEnum == BanStatus.ACTIVE))
-            {
-                if (string.IsNullOrEmpty(rec.PlayerIp) && !string.IsNullOrEmpty(ipAddress))
-                    rec.PlayerIp = ipAddress;
 
-                if (string.IsNullOrEmpty(rec.PlayerName) && !string.IsNullOrEmpty(playerName))
-                    rec.PlayerName = playerName;
-            }
+        await using (var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false))
+        {
+            await connection.ExecuteAsync(new CommandDefinition(baseSql, parameters, cancellationToken: ct)).ConfigureAwait(false);
         }
 
-        if (!string.IsNullOrEmpty(ipAddress) && IpHelper.TryConvertIpToUint(ipAddress, out var ipUInt) 
-                                             && _ipIndex.TryGetValue(ipUInt, out var ipRecords))
+        await _writer.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            foreach (var rec in ipRecords.Where(r => r.StatusEnum == BanStatus.ACTIVE))
+            var snapshot = Snapshot;
+            var patched = new List<BanRecord>();
+            uint ip = 0;
+            var hasIp = !string.IsNullOrEmpty(ipAddress) && IpHelper.TryConvertIpToUint(ipAddress, out ip);
+            foreach (var ban in snapshot.ActiveBans.Values)
             {
-                if (!rec.PlayerSteamId.HasValue && steamId.HasValue)
-                    rec.PlayerSteamId = steamId;
-
-                if (string.IsNullOrEmpty(rec.PlayerName) && !string.IsNullOrEmpty(playerName))
-                    rec.PlayerName = playerName;
+                var bySteam = steamId.HasValue && ban.PlayerSteamId == steamId;
+                var byIp = hasIp && !string.IsNullOrEmpty(ban.PlayerIp) && IpHelper.TryConvertIpToUint(ban.PlayerIp, out var banIp) && banIp == ip;
+                if (!bySteam && !byIp) continue;
+                var updated = ban with
+                {
+                    PlayerIp = string.IsNullOrEmpty(ban.PlayerIp) && playerIp != null ? playerIp : ban.PlayerIp,
+                    PlayerName = string.IsNullOrEmpty(ban.PlayerName) && !string.IsNullOrEmpty(playerName) ? playerName : ban.PlayerName,
+                    PlayerSteamId = ban.PlayerSteamId ?? (byIp ? steamId : null)
+                };
+                if (updated != ban) patched.Add(updated);
             }
+
+            if (patched.Count > 0) Publish(snapshot.WithBans(patched));
+        }
+        finally
+        {
+            _writer.Release();
         }
     }
 
-    private void Clear()
+    public string Describe()
     {
-        _steamIdIndex.Clear();
-        _ipIndex.Clear();
-
-        _banCache.Clear();
-        _playerIpsCache.Clear();
-        _cachedIgnoredIps.Clear();
+        var s = Snapshot;
+        return $"cache: initialized={s.IsInitialized} activeBans={s.ActiveCount} steamKeys={s.BySteamId.Count} ipKeys={s.ByIp.Count} " +
+               $"ipHistoryAccounts={s.IpsBySteamId.Count} ipHistoryAddresses={s.AccountsByIp.Count} banWatermark={_banWatermark:O} ipWatermark={_ipWatermark:O}\n";
     }
-    
+
     /// <summary>
-    /// Clears and disposes of all cached data and marks the object as disposed.
+    /// Marks the cache as disposed. Refresh/initialize calls made afterwards (late background work of an
+    /// unloaded plugin) do nothing; the snapshot is replaced by an empty one.
     /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
-        Clear();
         _disposed = true;
+        Publish(BanCacheSnapshot.Empty);
     }
 }
 

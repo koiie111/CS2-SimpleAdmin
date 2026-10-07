@@ -9,93 +9,24 @@ public class DiscordManager(string webhookUrl)
 {
     
     /// <summary>
-    /// Sends a plain text message asynchronously to the configured Discord webhook URL.
+    /// Queues a plain text message for the webhook (bounded HTTP queue, see <see cref="DiscordSender"/>).
+    /// Returns immediately; nothing is serialised or sent on the caller's (game) thread.
     /// </summary>
-    /// <param name="message">The text message to send to Discord.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
-    public async Task SendMessageAsync(string message)
+    public Task SendMessageAsync(string message)
     {
-        var client = CS2_SimpleAdmin.HttpClient;
-        var payload = new
-        {
-            content = message
-        };
-
-        var options = new JsonSerializerOptions
-        {
-            WriteIndented = false
-        };
-
-        var json = JsonSerializer.Serialize(payload, options);
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-        try
-        {
-            var response = await client.PostAsync(webhookUrl, content);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                CS2_SimpleAdmin._logger?.LogError(
-                    $"Failed to send discord message. Status Code: {response.StatusCode}, Reason: {response.ReasonPhrase}");
-            }
-        }
-        catch (HttpRequestException e)
-        {
-            CS2_SimpleAdmin._logger?.LogError($"Error sending discord message: {e.Message}");
-        }
+        DiscordSender.EnqueueText(webhookUrl, message);
+        return Task.CompletedTask;
     }
 
     /// <summary>
-    /// Sends an embed message asynchronously to the configured Discord webhook URL.
+    /// Queues an embed message for the webhook (bounded HTTP queue, see <see cref="DiscordSender"/>).
     /// </summary>
-    /// <param name="embed">The embed object containing rich content to send.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
-    public async Task SendEmbedAsync(Embed embed)
+    public Task SendEmbedAsync(Embed embed)
     {
-        var httpClient = CS2_SimpleAdmin.HttpClient;
-
-        var payload = new
-        {
-            embeds = new[]
-            {
-                new
-                {
-                    color = embed.Color,
-                    title = !string.IsNullOrEmpty(embed.Title) ? embed.Title : null,
-                    description = !string.IsNullOrEmpty(embed.Description) ? embed.Description : null,
-                    thumbnail = !string.IsNullOrEmpty(embed.ThumbnailUrl) ? new { url = embed.ThumbnailUrl } : null,
-                    image = !string.IsNullOrEmpty(embed.ImageUrl) ? new { url = embed.ImageUrl } : null,
-                    footer = !string.IsNullOrEmpty(embed.Footer?.Text) ? new { text = embed.Footer.Text, icon_url = embed.Footer.IconUrl } : null,
-                    timestamp = embed.Timestamp,
-                    fields = embed.Fields.Count > 0 ? embed.Fields.Select(field => new
-                    {
-                        name = field.Name,
-                        value = field.Value,
-                        inline = field.Inline
-                    }).ToArray() : null
-                }
-            }
-        };
-
-        var options = new JsonSerializerOptions
-        {
-            WriteIndented = false
-        };
-
-        var jsonPayload = JsonSerializer.Serialize(payload, options);
-        var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-
-        var response = await httpClient.PostAsync(webhookUrl, content);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorMessage = await response.Content.ReadAsStringAsync();
-            CS2_SimpleAdmin._logger?.LogError($"Failed to send embed: {response.StatusCode} - {errorMessage}");
-        }
+        DiscordSender.EnqueueEmbed(webhookUrl, embed);
+        return Task.CompletedTask;
     }
-    
+
     /// <summary>
     /// Converts a hexadecimal color string (e.g. "#FF0000") to its integer representation.
     /// </summary>

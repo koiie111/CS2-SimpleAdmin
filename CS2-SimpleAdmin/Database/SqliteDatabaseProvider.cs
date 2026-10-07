@@ -5,13 +5,29 @@ namespace CS2_SimpleAdmin.Database;
 
 public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
 {
-    private readonly string _connectionString = $"Data Source={filePath}";
+    // Default Timeout (seconds) is also System.Data.SQLite's busy-wait budget for a locked database file.
+    // All plugin access is serialised by the single-worker DB queue, so contention only comes from outside
+    // processes (backups, manual edits); WAL is not enabled because the file may live on shared/network storage.
+    private readonly string _connectionString = $"Data Source={filePath};Default Timeout=15";
 
-    public async Task<DbConnection> CreateConnectionAsync()
+    /// <summary>
+    /// System.Data.SQLite 1.0.119 does not override the ADO.NET async methods, so OpenAsync/ExecuteReaderAsync run
+    /// synchronously on the calling thread. Callers must therefore only use this provider from the DB queue workers,
+    /// never from a game-thread callback.
+    /// </summary>
+    public async Task<DbConnection> CreateConnectionAsync(CancellationToken cancellationToken = default)
     {
         var conn = new SQLiteConnection(_connectionString);
-        await conn.OpenAsync();
-        return conn;
+        try
+        {
+            await conn.OpenAsync(cancellationToken);
+            return conn;
+        }
+        catch
+        {
+            await conn.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<(bool Success, string? Exception)> CheckConnectionAsync()
@@ -387,6 +403,12 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
         multiServer
             ? "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime"
             : "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime AND server_id = @serverid";
+
+    public string GetPlayerPenaltyStatsQuery(bool multiServer) => SharedQueries.PlayerPenaltyStats(multiServer);
+    public string GetUpdateMutePassedBatchQuery(bool multiServer) => SharedQueries.UpdateMutePassedBatch(multiServer);
+    public string GetExpiredOnlineMutesBatchQuery(bool multiServer) => SharedQueries.ExpiredOnlineMutesBatch(multiServer);
+    public string GetPenaltyHistoryPageQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryPage(multiServer, type);
+    public string GetPenaltyHistoryCountQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryCount(multiServer, type);
 
     public string GetPenaltyHistoryQuery(bool multiServer) =>
         $"""

@@ -9,6 +9,8 @@ public class Migration(string migrationsPath)
     /// Executes all migration scripts found in the configured migrations path that have not been applied yet.
     /// Creates a migration tracking table if it does not exist.
     /// Applies migration scripts in filename order and logs successes or failures.
+    /// A failed script stops the run and is rethrown as <see cref="MigrationFailedException"/>, so the caller does not
+    /// treat a partially migrated database as ready (later scripts and queries may depend on the failed one).
     /// </summary>
     public async Task ExecuteMigrationsAsync()
     {
@@ -67,7 +69,7 @@ public class Migration(string migrationsPath)
             catch (Exception ex)
             {
                 CS2_SimpleAdmin._logger?.LogError(ex, $"Error applying migration \"{version}\".");
-                break;
+                throw new MigrationFailedException(version, ex);
             }
         }
     }
@@ -102,4 +104,11 @@ public class Migration(string migrationsPath)
 
         await cmd.ExecuteNonQueryAsync();
     }
+}
+
+
+public sealed class MigrationFailedException(string version, Exception inner)
+    : Exception($"Migration \"{version}\" failed: {inner.Message}", inner)
+{
+    public string Version { get; } = version;
 }

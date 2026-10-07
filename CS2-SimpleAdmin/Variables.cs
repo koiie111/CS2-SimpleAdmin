@@ -35,12 +35,31 @@ public partial class CS2_SimpleAdmin
     // Command and Server Settings
     public static readonly bool UnlockedCommands = CoreConfig.UnlockConCommands;
     internal static string IpAddress = string.Empty;
-    internal static bool ServerLoaded;
-    internal static int? ServerId = null;
+    // Written on the game thread (MarkReady), read from background work
+    internal static volatile bool ServerLoaded;
+    private static int _serverIdRaw = -1;
+    /// <summary>sa_servers.id of this server, or null before it is resolved. Atomic for cross-thread reads.</summary>
+    internal static int? ServerId
+    {
+        get
+        {
+            var value = Volatile.Read(ref _serverIdRaw);
+            return value < 0 ? null : value;
+        }
+        set => Volatile.Write(ref _serverIdRaw, value ?? -1);
+    }
     internal static readonly HashSet<ulong> AdminDisabledJoinComms = [];
 
     // Player Management
     internal static readonly HashSet<int> SilentPlayers = [];
+    private static HashSet<int> _silentSnapshot = [];
+    /// <summary>
+    /// Copy of <see cref="SilentPlayers"/> handed out through the API (ListSilentAdminsSlots). Replaced, never mutated,
+    /// whenever the silent set changes, so callers can poll it every frame without allocations and cannot corrupt
+    /// the plugin's own set.
+    /// </summary>
+    internal static HashSet<int> SilentSnapshot => Volatile.Read(ref _silentSnapshot);
+    internal static void PublishSilentSnapshot() => Volatile.Write(ref _silentSnapshot, [..SilentPlayers]);
     internal static readonly Dictionary<ulong, string> RenamedPlayers = [];
     internal static readonly ConcurrentDictionary<ulong, PlayerInfo> PlayersInfo = [];
     internal static readonly List<CCSPlayerController> CachedPlayers = [];

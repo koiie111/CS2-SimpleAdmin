@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Commands.Targeting;
 using CounterStrikeSharp.API.Modules.Memory.DynamicFunctions;
 using CS2_SimpleAdmin.Database;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using CS2_SimpleAdmin.Menus;
 using CS2_SimpleAdminApi;
@@ -32,6 +33,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
     public override void Load(bool hotReload)
     {
         Instance = this;
+        GameThread.Capture();
+        Runtime.Restart();
         if (hotReload)
         {
             ServerLoaded = false;
@@ -50,11 +53,16 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
                 PlayersInfo.Clear();
                 CachedPlayers.Clear();
                 BotPlayers.Clear();
+                Runtime.Sessions.Clear();
                 
                 foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p is { Connected: PlayerConnectedState.Connected, IsHLTV: false }).ToArray()) 
                 {
                     if (!player.IsBot)
+                    {
+                        if (!CachedPlayers.Contains(player))
+                            CachedPlayers.Add(player);
                         PlayerManager.LoadPlayerData(player, true);
+                    }
                     else
                         BotPlayers.Add(player);
                 };
@@ -70,6 +78,9 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         PlayersTimer = null;
         PlayerManager.CheckPlayersTimer();
         
+        // Diagnostics: queue sizes, handler/apply latency percentiles, DB/HTTP counters (@css/root)
+        AddCommand("css_sa_perf", "CS2-SimpleAdmin performance counters ([reset])", OnPerfCommand);
+
         Menus.MenuManager.Instance.InitializeDefaultCategories();
         BasicMenu.Initialize();
     }
@@ -171,6 +182,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         }
 
         Instance = this;
+        GameThread.Capture();
+        Runtime.Restart();
         
     if (Config.DatabaseConfig.DatabaseType.Contains("mysql", StringComparison.CurrentCultureIgnoreCase))
     {
@@ -192,6 +205,11 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
                         ? sslMode
                         : MySqlSslMode.Preferred,
             Pooling = true,
+            // Deadlines for every connect/query, so a stalled DB frees the bounded DB workers instead of holding them
+            ConnectionTimeout = 10,
+            DefaultCommandTimeout = 30,
+            // Rows edited by the site may contain 0000-00-00 dates; read them as DateTime.MinValue instead of failing the whole cache load
+            ConvertZeroDateTime = true,
         };
 
         DbConnectionString = builder.ConnectionString;
@@ -207,18 +225,12 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         DatabaseProvider = new SqliteDatabaseProvider(ModuleDirectory + "/" + config.DatabaseConfig.SqliteFilePath);
     }
 
-    var (success, exception) = Task.Run(() => DatabaseProvider.CheckConnectionAsync()).GetAwaiter().GetResult();
-    if (!success)
-    {
-        if (exception != null)
-            Logger.LogError("Problem with database connection! \n{exception}", exception);
+        // No waiting here: OnConfigParsed runs on the server thread, also when the plugin is (re)loaded on a live
+        // server. Connect + migrations run in the background; commands report the state until it is ready.
+        Time.Configure(config.DatabaseConfig.DatabaseType, config.Timezone);
+        Runtime.Start(DatabaseProvider is SqliteDatabaseProvider);
+        StartDatabaseInitialization();
 
-        Unload(false);
-        return;
-    }
-
-        Task.Run(() => DatabaseProvider.DatabaseMigrationAsync());
-        
         if (!Directory.Exists(ModuleDirectory + "/data"))
         {
             Directory.CreateDirectory(ModuleDirectory + "/data");
@@ -230,7 +242,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
             DiscordWebhookClientLog = new DiscordManager(Config.Discord.DiscordLogWebhook);
 
         if (Config.EnableUpdateCheck)
-            Task.Run(async () => await PluginInfo.CheckVersion(ModuleVersion, Logger));
+            Runtime.Http?.TryEnqueue("update-check", _ => PluginInfo.CheckVersion(ModuleVersion, Logger));
         
         PermissionManager = new PermissionManager(DatabaseProvider);
         BanManager = new BanManager(DatabaseProvider);
@@ -260,10 +272,14 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
 
     public override void Unload(bool hotReload)
     {
+        // Cancel and invalidate background work first; never wait for it here (game thread).
+        Runtime.Stop();
+        PeriodicMaintenance.Reset();
         CacheManager?.Dispose();
         CacheManager = null;
         PlayersTimer?.Kill();
         PlayersTimer = null;
+        PlayerPenaltyManager.RemoveAllPenalties();
         
         UnregisterEvents();
         

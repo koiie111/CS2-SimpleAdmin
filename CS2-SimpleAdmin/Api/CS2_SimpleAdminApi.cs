@@ -18,9 +18,12 @@ public class CS2_SimpleAdminApi : ICS2_SimpleAdminApi
 
     public PlayerInfo GetPlayerInfo(CCSPlayerController player)
     {
-        return !player.UserId.HasValue
-            ? throw new KeyNotFoundException("Player with specific UserId not found")
-            : CS2_SimpleAdmin.PlayersInfo[player.SteamID];
+        if (!player.UserId.HasValue)
+            throw new KeyNotFoundException("Player with specific UserId not found");
+        // Before the connect load finished there is no entry yet; give callers a fresh snapshot instead of throwing
+        return CS2_SimpleAdmin.PlayersInfo.TryGetValue(player.SteamID, out var info)
+            ? info
+            : CS2_SimpleAdmin.CreatePlayerInfoSnapshot(player);
     }
 
     public string GetConnectionString() => CS2_SimpleAdmin.Instance.DbConnectionString;
@@ -141,9 +144,13 @@ public class CS2_SimpleAdminApi : ICS2_SimpleAdminApi
         return CS2_SimpleAdmin.SilentPlayers.Contains(player.Slot);
     }
 
+    /// <summary>
+    /// Returns a snapshot of the silent slots (replaced when the set changes). Treat it as read-only:
+    /// it is shared between callers, but changing it no longer affects the plugin's own state.
+    /// </summary>
     public HashSet<int> ListSilentAdminsSlots()
     {
-        return CS2_SimpleAdmin.SilentPlayers;
+        return CS2_SimpleAdmin.SilentSnapshot;
     }
 
     public void RegisterCommand(string name, string? description, CommandInfo.CommandCallback callback)
