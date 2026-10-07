@@ -896,9 +896,12 @@ internal static class Helper
             return;
         }
 
-        if (node != null)
+        if (node is JsonObject root)
         {
-            node["Version"] = newCfgVersion;
+            // fork: the property is serialized as "ConfigVersion"; upstream wrote "Version", so the
+            // real version never changed and the file was rewritten on every start.
+            root.Remove("Version");
+            root["ConfigVersion"] = newCfgVersion;
             var updatedJsonContent = node.ToJsonString(new JsonSerializerOptions
             {
                 WriteIndented = true,
@@ -915,6 +918,55 @@ internal static class Helper
     /// such a server silently runs on an empty local SQLite file: no admins, no bans from the site.
     /// Moves the legacy keys into DatabaseConfig (MySQL) and saves the file.
     /// </summary>
+    /// <summary>
+    /// fork: 1.5.x kept KickTime, BanType, MaxBanDuration, ... at the config root; 1.9 reads them from
+    /// "OtherSettings" and silently falls back to its defaults (BanType 1 turns on IP bans). Apply the
+    /// root values in memory when OtherSettings does not set them; the file is left untouched.
+    /// </summary>
+    public static void ApplyLegacyOtherSettings(CS2_SimpleAdminConfig config)
+    {
+        if (!File.Exists(CfgPath))
+            return;
+
+        JsonObject? root;
+        try
+        {
+            root = JsonNode.Parse(File.ReadAllText(CfgPath), documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            }) as JsonObject;
+        }
+        catch (JsonException ex)
+        {
+            CS2_SimpleAdmin._logger?.LogWarning($"Could not read legacy settings from {CfgPath}: {ex.Message}");
+            return;
+        }
+        if (root == null)
+            return;
+
+        var other = root["OtherSettings"] as JsonObject;
+        var applied = new List<string>();
+        foreach (var property in typeof(OtherSettings).GetProperties())
+        {
+            var key = property.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>()?.Name ?? property.Name;
+            if (other?.ContainsKey(key) == true || !root.TryGetPropertyValue(key, out var value) || value == null)
+                continue;
+            try
+            {
+                property.SetValue(config.OtherSettings, value.Deserialize(property.PropertyType));
+                applied.Add($"{key}={value.ToJsonString()}");
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                CS2_SimpleAdmin._logger?.LogWarning($"Legacy setting {key} ignored: {ex.Message}");
+            }
+        }
+
+        if (applied.Count > 0)
+            CS2_SimpleAdmin._logger?.LogInformation($"Applied legacy root settings to OtherSettings: {string.Join(", ", applied)}");
+    }
+
     public static void MigrateLegacyDatabaseConfig(CS2_SimpleAdminConfig config)
     {
         if (!string.IsNullOrWhiteSpace(config.DatabaseConfig.DatabaseHost) || !File.Exists(CfgPath))

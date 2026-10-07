@@ -106,6 +106,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         _logger = Logger; // fork: before UpdateConfig so its warnings are logged
         Helper.UpdateConfig(config);
         Helper.MigrateLegacyDatabaseConfig(config);
+        Helper.ApplyLegacyOtherSettings(config);
 
         Config = config;
 

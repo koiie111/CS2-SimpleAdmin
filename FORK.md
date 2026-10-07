@@ -48,6 +48,16 @@
   по умолчанию `"DatabaseType": "SQLite"`. Со старым конфигом upstream молча работает на пустом локальном
   `cs2-simpleadmin.sqlite`: без админов и без банов с сайта. Форк переносит ключи в `DatabaseConfig`
   (`MySQL`), сохраняет файл и пишет предупреждение в лог (без пароля).
+- **Старый конфиг 1.5.x работает без правок, поведение как раньше.**
+  - `KickTime`, `DisableDangerousCommands`, `BanType`, `TimeMode`, `MaxBanDuration`, `ExpireOldIpBans`, `TeamSwitchType`,
+    `ReloadAdminsEveryMapChange` из корня применяются как `OtherSettings` (в памяти, файл не меняется), если в
+    `OtherSettings` их нет. Без этого 1.9 брала свои значения по умолчанию, и `BanType 1` включал баны по IP.
+  - По умолчанию выключены новые функции 1.9, которых не было в 1.5.x: `CheckMultiAccountsByIp` (через зеркала
+    один забаненный блокировал вход всем на этом зеркале), `NotifyPenaltiesToAdminOnConnect`;
+    `MaxMuteDuration: 0` значит «без ограничений мута» (в 1.5.x проверок мута не было; положительное значение
+    включает проверки upstream, включая `@css/permmute` для перманентного мута).
+  - `UpdateConfig` записывает версию в `ConfigVersion`, а не в лишний `Version`, как делал upstream.
+    Из-за этой ошибки версия в файле не менялась, и файл перезаписывался при каждом запуске.
 - **Автосборка:** каждый пуш в `main` собирает плагин, API и модули
   (`.github/workflows/build.yml`) и публикует релиз с тегом `build-<VERSION>-<run_number>`.
   Номер запуска в теге нужен, чтобы два пуша с одной и той же `VERSION` не падали

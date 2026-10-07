@@ -215,8 +215,9 @@ public class OtherSettings
     [JsonPropertyName("MaxBanDuration")]
     public int MaxBanDuration { get; set; } = 60 * 24 * 7;
     
+    // fork: 0 = no mute limits (1.5.x had none); a positive value enables upstream's checks
     [JsonPropertyName("MaxMuteDuration")]
-    public int MaxMuteDuration { get; set; } = 60 * 24 * 7;
+    public int MaxMuteDuration { get; set; } = 0;
 
     [JsonPropertyName("ExpireOldIpBans")]
     public int ExpireOldIpBans { get; set; } = 0;
@@ -227,8 +228,9 @@ public class OtherSettings
     [JsonPropertyName("DisconnectedPlayersHistoryCount")]
     public int DisconnectedPlayersHistoryCount { get; set; } = 10;
     
+    // fork: off by default, 1.5.x had no such notification
     [JsonPropertyName("NotifyPenaltiesToAdminOnConnect")]
-    public bool NotifyPenaltiesToAdminOnConnect { get; set; } = true;
+    public bool NotifyPenaltiesToAdminOnConnect { get; set; } = false;
     
     [JsonPropertyName("ShowBanMenuIfNoTime")]
     public bool ShowBanMenuIfNoTime { get; set; } = true;
@@ -236,8 +238,10 @@ public class OtherSettings
     [JsonPropertyName("UserMessageGagChatType")]
     public bool UserMessageGagChatType { get; set; } = false;
     
+    // fork: off by default. Players joining through mirrors share the mirror IP, so a single banned
+    // account there would lock out everyone else (1.5.x checked bans by SteamID only).
     [JsonPropertyName("CheckMultiAccountsByIp")]
-    public bool CheckMultiAccountsByIp { get; set; } = true;
+    public bool CheckMultiAccountsByIp { get; set; } = false;
 
     [JsonPropertyName("AdditionalCommandsToLog")]
     public List<string> AdditionalCommandsToLog { get; set; } = new();

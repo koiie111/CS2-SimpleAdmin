@@ -956,6 +956,7 @@ public partial class CS2_SimpleAdmin
     private bool CheckValidMute(CCSPlayerController? caller, int duration)
     {
         if (caller == null) return true;
+        if (Config.OtherSettings.MaxMuteDuration <= 0) return true; // fork: no mute limits, as in 1.5.x
 
         var canPermMute = AdminManager.PlayerHasPermissions(new SteamID(caller.SteamID), "@css/permmute");
 
