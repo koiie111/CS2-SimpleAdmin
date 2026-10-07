@@ -103,7 +103,7 @@ public class R9_AdminReloadTests
         using var world = new TestWorld();
         var results = new Queue<AdminReloadResult>([AdminReloadResult.Failed, AdminReloadResult.Failed, AdminReloadResult.Success]);
         var calls = 0;
-        await ServerManager.ReloadAdminsWithRetriesAsync(() => { calls++; return Task.FromResult(results.Dequeue()); },
+        await ServerManager.ReloadAdminsWithRetriesAsync(_ => { calls++; return Task.FromResult(results.Dequeue()); },
             Current(), [TimeSpan.Zero, TimeSpan.Zero]);
         Assert.Equal(3, calls);
     }
@@ -114,7 +114,7 @@ public class R9_AdminReloadTests
         using var world = new TestWorld();
         var calls = 0;
         await Assert.ThrowsAsync<InvalidOperationException>(() => ServerManager.ReloadAdminsWithRetriesAsync(
-            () => { calls++; return Task.FromResult(AdminReloadResult.Failed); }, Current(), [TimeSpan.Zero, TimeSpan.Zero]));
+            _ => { calls++; return Task.FromResult(AdminReloadResult.Failed); }, Current(), [TimeSpan.Zero, TimeSpan.Zero]));
         Assert.Equal(3, calls); // 1 + 2 retries, then it stops
     }
 
@@ -123,7 +123,7 @@ public class R9_AdminReloadTests
     {
         using var world = new TestWorld();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ServerManager.ReloadAdminsWithRetriesAsync(
-            () => Task.FromResult(AdminReloadResult.Canceled), Current(), [TimeSpan.Zero]));
+            _ => Task.FromResult(AdminReloadResult.Canceled), Current(), [TimeSpan.Zero]));
     }
 
     // ---- files and permissions stay intact ----

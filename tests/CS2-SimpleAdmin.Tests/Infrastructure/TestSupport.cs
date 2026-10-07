@@ -115,7 +115,7 @@ internal sealed class FlakyQueriesProvider(IDatabaseProvider inner) : FakeProvid
     public volatile bool FailStats;
     public volatile bool FailMutes;
     public volatile bool FailExpiredRead;
-    public volatile bool FailPlanRead;
+    public bool FailPlanRead { get; set; }
     public volatile bool FailAdmins;
     public volatile bool FailGroups;
     public int Connections;
