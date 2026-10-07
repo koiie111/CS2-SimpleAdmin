@@ -21,7 +21,7 @@ WHERE `player_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 UPDATE `sa_bans` SET `player_steamid` = NULL WHERE `player_steamid` NOT REGEXP '^[0-9]{1,18}$';
 INSERT INTO `sa_migration_backup` (`migration`, `table_name`, `row_id`, `column_name`, `old_value`)
 SELECT '015', 'sa_bans', `id`, 'admin_steamid', `admin_steamid` FROM `sa_bans`
-WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND `admin_steamid` <> 'Console';
+WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND CAST(`admin_steamid` AS CHAR) <> 'Console';
 UPDATE `sa_bans` SET `admin_steamid` = 76561197960265728 + CAST(SUBSTRING_INDEX(`admin_steamid`, ':', -1) AS UNSIGNED) * 2 + CAST(SUBSTRING(`admin_steamid`, 9, 1) AS UNSIGNED)
 WHERE `admin_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 
@@ -33,7 +33,7 @@ WHERE `player_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 UPDATE `sa_mutes` SET `player_steamid` = NULL WHERE `player_steamid` NOT REGEXP '^[0-9]{1,18}$';
 INSERT INTO `sa_migration_backup` (`migration`, `table_name`, `row_id`, `column_name`, `old_value`)
 SELECT '015', 'sa_mutes', `id`, 'admin_steamid', `admin_steamid` FROM `sa_mutes`
-WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND `admin_steamid` <> 'Console';
+WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND CAST(`admin_steamid` AS CHAR) <> 'Console';
 UPDATE `sa_mutes` SET `admin_steamid` = 76561197960265728 + CAST(SUBSTRING_INDEX(`admin_steamid`, ':', -1) AS UNSIGNED) * 2 + CAST(SUBSTRING(`admin_steamid`, 9, 1) AS UNSIGNED)
 WHERE `admin_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 
@@ -45,13 +45,13 @@ WHERE `player_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 UPDATE `sa_warns` SET `player_steamid` = NULL WHERE `player_steamid` NOT REGEXP '^[0-9]{1,18}$';
 INSERT INTO `sa_migration_backup` (`migration`, `table_name`, `row_id`, `column_name`, `old_value`)
 SELECT '015', 'sa_warns', `id`, 'admin_steamid', `admin_steamid` FROM `sa_warns`
-WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND `admin_steamid` <> 'Console';
+WHERE `admin_steamid` NOT REGEXP '^[0-9]{1,18}$' AND CAST(`admin_steamid` AS CHAR) <> 'Console';
 UPDATE `sa_warns` SET `admin_steamid` = 76561197960265728 + CAST(SUBSTRING_INDEX(`admin_steamid`, ':', -1) AS UNSIGNED) * 2 + CAST(SUBSTRING(`admin_steamid`, 9, 1) AS UNSIGNED)
 WHERE `admin_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 
 INSERT INTO `sa_migration_backup` (`migration`, `table_name`, `row_id`, `column_name`, `old_value`)
 SELECT '015', 'sa_admins', `id`, 'player_steamid', `player_steamid` FROM `sa_admins`
-WHERE `player_steamid` NOT REGEXP '^[0-9]{1,18}$' AND `player_steamid` <> 'Console';
+WHERE `player_steamid` NOT REGEXP '^[0-9]{1,18}$' AND CAST(`player_steamid` AS CHAR) <> 'Console';
 UPDATE `sa_admins` SET `player_steamid` = 76561197960265728 + CAST(SUBSTRING_INDEX(`player_steamid`, ':', -1) AS UNSIGNED) * 2 + CAST(SUBSTRING(`player_steamid`, 9, 1) AS UNSIGNED)
 WHERE `player_steamid` REGEXP '^STEAM_[0-5]:[01]:[0-9]{1,10}$';
 
