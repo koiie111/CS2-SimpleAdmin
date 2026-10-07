@@ -19,7 +19,12 @@ namespace CS2_SimpleAdmin.Managers;
 /// </summary>
 public static class PlayerPenaltyManager
 {
-    internal readonly record struct Entry(DateTime EndDateTime, int Duration, bool Passed);
+    /// <param name="Revision">
+    /// Position of the operation that created the entry in the order in which the game thread accepted operations
+    /// (<see cref="NextRevision"/>). A deferred removal captures its own revision when it is accepted and later removes
+    /// only entries up to it, so a penalty accepted after the removal can never be erased by it.
+    /// </param>
+    internal readonly record struct Entry(DateTime EndDateTime, int Duration, bool Passed, long Revision = 0);
 
     /// <summary>Immutable penalties of one slot. Index = (int)PenaltyType.</summary>
     internal sealed class SlotPenalties
@@ -52,6 +57,15 @@ public static class PlayerPenaltyManager
     private const int TypeCount = (int)PenaltyType.Warn + 1;
     private static readonly SlotPenalties?[] Slots = new SlotPenalties?[PlayerSessions.MaxSlots];
 
+    private static long _revision;
+
+    /// <summary>
+    /// Next position in the accept order of penalty operations (commands, connect loads). Unique and increasing; taken
+    /// on the game thread when an operation is accepted, so it orders operations exactly like the per-player SQL order
+    /// (see <see cref="Infrastructure.KeyedSequencer"/>).
+    /// </summary>
+    internal static long NextRevision() => Interlocked.Increment(ref _revision);
+
     private static int CurrentTimeMode => CS2_SimpleAdmin.CurrentConfig.OtherSettings.TimeMode;
 
     private static void Update(int slot, Func<SlotPenalties, SlotPenalties?> change)
@@ -74,10 +88,14 @@ public static class PlayerPenaltyManager
     /// <param name="penaltyType">The type of penalty to apply (e.g. gag, mute, silence).</param>
     /// <param name="endDateTime">The validity expiration date/time of the penalty.</param>
     /// <param name="durationInMinutes">The duration of the penalty in minutes (0 for permanent).</param>
-    public static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes)
+    public static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes) =>
+        AddPenalty(slot, penaltyType, endDateTime, durationInMinutes, 0);
+
+    /// <param name="revision">The accept-order position of the operation (0 = take a new one now).</param>
+    internal static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes, long revision)
     {
         if ((uint)penaltyType >= TypeCount) return;
-        var entry = new Entry(endDateTime, durationInMinutes, false);
+        var entry = new Entry(endDateTime, durationInMinutes, false, revision != 0 ? revision : NextRevision());
         Update(slot, current =>
         {
             var list = current.Get(penaltyType);
@@ -230,6 +248,30 @@ public static class PlayerPenaltyManager
     {
         if ((uint)penaltyType >= TypeCount) return;
         Update(slot, current => current.Get(penaltyType) == null ? current : current.With(penaltyType, null));
+    }
+
+    /// <summary>
+    /// Removes the penalties of one type that were accepted at or before <paramref name="upToRevision"/>; later ones
+    /// (a mute issued after the removal was accepted) stay.
+    /// </summary>
+    internal static void RemovePenaltiesByType(int slot, PenaltyType penaltyType, long upToRevision)
+    {
+        if ((uint)penaltyType >= TypeCount) return;
+        Update(slot, current =>
+        {
+            var list = current.Get(penaltyType);
+            if (list == null) return current;
+            var keep = 0;
+            foreach (var e in list)
+                if (e.Revision > upToRevision) keep++;
+            if (keep == list.Length) return current;
+
+            var next = new Entry[keep];
+            var j = 0;
+            foreach (var e in list)
+                if (e.Revision > upToRevision) next[j++] = e;
+            return current.With(penaltyType, next);
+        });
     }
 
     /// <summary>

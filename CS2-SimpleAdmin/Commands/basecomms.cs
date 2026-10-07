@@ -88,7 +88,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Gag, reason, time,
                     penaltyId);
             });
-        })) return;
+        }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Gag, Time.ActualDateTime().AddMinutes(time), time);
@@ -166,7 +166,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Gag, reason, time,
                         penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid.SteamId64)) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Gag, _localizer);
         }
@@ -235,7 +235,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Gag, reason, time,
                         penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid)) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Gag, _localizer);
 
@@ -286,9 +286,9 @@ public partial class CS2_SimpleAdmin
             {
                 // SteamID is read here (game thread); the worker only gets the string
                 var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
-                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 0, target, false)) return;
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 0, target, false, player.PlayerName)) return;
 
-                command.ReplyToCommand($"Ungaged player {player.PlayerName}.");
+                command.ReplyToCommand($"Ungag of {player.PlayerName} queued; the result follows after the database write.");
                 return;
             }
         }
@@ -300,15 +300,15 @@ public partial class CS2_SimpleAdmin
         if (namePlayer != null && namePlayer.IsValid)
         {
             var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
-            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 0, target, true)) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 0, target, true, namePlayer.PlayerName)) return;
 
-            command.ReplyToCommand($"Ungaged player {namePlayer.PlayerName}.");
+            command.ReplyToCommand($"Ungag of {namePlayer.PlayerName} queued; the result follows after the database write.");
         }
         else
         {
             if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 0, null, false)) return;
 
-            command.ReplyToCommand($"Ungaged offline player with pattern {pattern}.");
+            command.ReplyToCommand($"Ungag of offline pattern {pattern} queued; the result follows after the database write.");
         }
     }
 
@@ -391,7 +391,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Mute, reason, time,
                     penaltyId);
             });
-        })) return;
+        }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Mute, Time.ActualDateTime().AddMinutes(time), time);
@@ -492,7 +492,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Mute, reason, time,
                         penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid)) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Mute, _localizer);
             
@@ -544,7 +544,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Mute, reason, time,
                         penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid.SteamId64)) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Mute, _localizer);
         }
@@ -591,9 +591,9 @@ public partial class CS2_SimpleAdmin
             {
                 // SteamID is read here (game thread); the worker only gets the string
                 var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
-                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 1, target, false)) return;
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 1, target, false, player.PlayerName)) return;
 
-                command.ReplyToCommand($"Unmuted player {player.PlayerName}.");
+                command.ReplyToCommand($"Unmute of {player.PlayerName} queued; the result follows after the database write.");
                 return;
             }
         }
@@ -605,15 +605,15 @@ public partial class CS2_SimpleAdmin
         if (namePlayer != null && namePlayer.IsValid)
         {
             var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
-            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 1, target, true)) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 1, target, true, namePlayer.PlayerName)) return;
 
-            command.ReplyToCommand($"Unmuted player {namePlayer.PlayerName}.");
+            command.ReplyToCommand($"Unmute of {namePlayer.PlayerName} queued; the result follows after the database write.");
         }
         else
         {
             if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 1, null, false)) return;
 
-            command.ReplyToCommand($"Unmuted offline player with pattern {pattern}.");
+            command.ReplyToCommand($"Unmute of offline pattern {pattern} queued; the result follows after the database write.");
         }
     }
 
@@ -694,7 +694,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Silence, reason, time,
                     penaltyId);
             });
-        })) return;
+        }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
         PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Silence, Time.ActualDateTime().AddMinutes(time), time);
@@ -797,7 +797,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Silence, reason,
                         time, penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid)) return;
 
             Helper.SendDiscordPenaltyMessage(caller, steamid.ToString(), reason, time, PenaltyType.Silence, _localizer);
 
@@ -849,7 +849,7 @@ public partial class CS2_SimpleAdmin
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Silence, reason,
                         time, penaltyId);
                 });
-            })) return;
+            }, orderKey: steamid.SteamId64)) return;
             
             Helper.SendDiscordPenaltyMessage(caller, steamid.SteamId64.ToString(), reason, time, PenaltyType.Silence, _localizer);
         }
@@ -896,9 +896,9 @@ public partial class CS2_SimpleAdmin
             {
                 // SteamID is read here (game thread); the worker only gets the string
                 var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
-                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 2, target, false)) return;
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 2, target, false, player.PlayerName)) return;
 
-                command.ReplyToCommand($"Unsilenced player {player.PlayerName}.");
+                command.ReplyToCommand($"Unsilence of {player.PlayerName} queued; the result follows after the database write.");
                 return;
             }
         }
@@ -910,15 +910,15 @@ public partial class CS2_SimpleAdmin
         if (namePlayer != null && namePlayer.IsValid)
         {
             var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
-            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 2, target, true)) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 2, target, true, namePlayer.PlayerName)) return;
 
-            command.ReplyToCommand($"Unsilenced player {namePlayer.PlayerName}.");
+            command.ReplyToCommand($"Unsilence of {namePlayer.PlayerName} queued; the result follows after the database write.");
         }
         else
         {
             if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 2, null, false)) return;
 
-            command.ReplyToCommand($"Unsilenced offline player with pattern {pattern}.");
+            command.ReplyToCommand($"Unsilence of offline pattern {pattern} queued; the result follows after the database write.");
         }
     }
     

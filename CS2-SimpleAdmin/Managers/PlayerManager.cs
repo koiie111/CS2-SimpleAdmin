@@ -32,7 +32,8 @@ internal class PlayerManager
         bool Banned,
         PlayerPenaltyStats Stats,
         List<ActiveMuteRow> ActiveMutes,
-        List<(ulong SteamId, string PlayerName)> AccountsAssociated);
+        List<(ulong SteamId, string PlayerName)> AccountsAssociated,
+        long Revision = 0);
 
     /// <summary>
     /// Loads and initializes player data when a client connects (game thread).
@@ -112,7 +113,12 @@ internal class PlayerManager
         if (attempt == 0) return;
 
         var config = plugin.Config; // one config snapshot for the whole operation
-        if (Runtime.TryQueueDb<bool>("connect-load", ct => LoadAsync(session, attempt, config, cache, ct)) != null) return;
+        // The load takes its place in this player's penalty order now: an unmute/mute accepted after it runs after its
+        // SQL and removes/outranks the entries it applies (they carry this accept position, see PlayerPenaltyManager.Entry)
+        var revision = PlayerPenaltyManager.NextRevision();
+        if (Runtime.TryQueueDbOrdered<bool>("connect-load", ct => LoadAsync(session, attempt, config, cache, revision, ct),
+                session.SteamId) != null)
+            return;
 
         // Queue full or stopped: nothing was tried, so wait a moment and try again (never silently forgotten)
         if (session.ReleaseLoad(attempt, Stopwatch.GetTimestamp(), LoadRetryPolicy.QueueFullDelay))
@@ -147,11 +153,11 @@ internal class PlayerManager
     }
 
     private async Task<bool> LoadAsync(PlayerSession session, int attempt, CS2_SimpleAdminConfig config, CacheManager cache,
-        CancellationToken ct)
+        long revision, CancellationToken ct)
     {
         try
         {
-            await LoadCoreAsync(session, attempt, config, cache, ct).ConfigureAwait(false);
+            await LoadCoreAsync(session, attempt, config, cache, revision, ct).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException)
@@ -169,7 +175,7 @@ internal class PlayerManager
     }
 
     private async Task LoadCoreAsync(PlayerSession session, int attempt, CS2_SimpleAdminConfig config, CacheManager cache,
-        CancellationToken ct)
+        long revision, CancellationToken ct)
     {
         var start = LatencyHistogram.Now();
         var plugin = CS2_SimpleAdmin.Instance;
@@ -226,7 +232,7 @@ internal class PlayerManager
         var mutes = await plugin.MuteManager.GetActiveMutesAsync(session.SteamId, config.MultiServerMode, other.TimeMode,
             serverId, now, ct).ConfigureAwait(false);
 
-        var result = new LoadResult(false, stats, mutes, accounts);
+        var result = new LoadResult(false, stats, mutes, accounts, revision);
         await Runtime.OnGameThread(() => ApplyLoadResult(session, attempt, result, config)).ConfigureAwait(false);
         PluginMetrics.ConnectLoad.RecordSince(start);
     }
@@ -271,14 +277,14 @@ internal class PlayerManager
             switch (mute.Type)
             {
                 case "GAG":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Gag, ends, mute.Duration);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Gag, ends, mute.Duration, result.Revision);
                     break;
                 case "MUTE":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Mute, ends, mute.Duration);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Mute, ends, mute.Duration, result.Revision);
                     voiceMuted = true;
                     break;
                 default:
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Silence, ends, mute.Duration);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Silence, ends, mute.Duration, result.Revision);
                     voiceMuted = true;
                     break;
             }

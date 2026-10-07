@@ -129,6 +129,9 @@ internal static class Runtime
     public static GameDispatcher Dispatcher => _context.Dispatcher;
     public static BoundedWorkQueue? Db { get; private set; }
     public static BoundedWorkQueue? Http { get; private set; }
+
+    /// <summary>Per-player order of database jobs for the current start/stop cycle (see <see cref="KeyedSequencer"/>).</summary>
+    public static KeyedSequencer? Sequencer { get; private set; }
     public static readonly PlayerSessions Sessions = new();
 
     private static volatile PluginState _state = PluginState.Starting;
@@ -205,6 +208,7 @@ internal static class Runtime
             var token = _context.Token;
             Db = new BoundedWorkQueue("db", dbCapacity, sqlite ? 1 : 4, token, PluginMetrics.DbQueueWait, CaptureWork);
             Http = new BoundedWorkQueue("http", HttpQueueCapacity, 2, token, captureContext: CaptureWork);
+            Sequencer = new KeyedSequencer();
         }
     }
 
@@ -227,6 +231,7 @@ internal static class Runtime
             Http?.Complete();
             Db = null;
             Http = null;
+            Sequencer = null;
             Sessions.Clear();
         }
     }
@@ -303,6 +308,62 @@ internal static class Runtime
     {
         lock (StartLock)
             return context.Runtime.IsCurrent && (Db?.TryEnqueue(operation, work, context) ?? false);
+    }
+
+    /// <summary>
+    /// Like <see cref="TryQueueDb(string, Func{CancellationToken, Task}, WorkContext)"/>, but the job runs only after
+    /// every job accepted <b>earlier</b> for the same <paramref name="orderKey"/> (a SteamID64) has finished, and before
+    /// every job accepted later. The place in that order is taken now, on the caller's (game) thread, which never waits;
+    /// the wait happens asynchronously inside the job on a queue worker. A refused job gives its place back at once.
+    /// </summary>
+    public static bool TryQueueDbOrdered(string operation, Func<CancellationToken, Task> work, WorkContext context, ulong orderKey)
+    {
+        lock (StartLock)
+        {
+            if (!context.Runtime.IsCurrent || Db == null || Sequencer == null) return false;
+            var ticket = Sequencer.Acquire(orderKey);
+            if (Db.TryEnqueue(operation, async ct =>
+                {
+                    try
+                    {
+                        await ticket.WaitTurnAsync(ct).ConfigureAwait(false);
+                        await work(ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ticket.Release();
+                    }
+                }, context))
+                return true;
+
+            ticket.Release();
+            return false;
+        }
+    }
+
+    /// <summary>Typed variant of <see cref="TryQueueDbOrdered(string, Func{CancellationToken, Task}, WorkContext, ulong)"/>; null when refused.</summary>
+    public static Task<T>? TryQueueDbOrdered<T>(string operation, Func<CancellationToken, Task<T>> work, ulong orderKey)
+    {
+        lock (StartLock)
+        {
+            var context = CaptureWork();
+            if (!context.Runtime.IsCurrent || Db == null || Sequencer == null) return null;
+            var ticket = Sequencer.Acquire(orderKey);
+            var job = Db.TryEnqueue<T>(operation, async ct =>
+            {
+                try
+                {
+                    await ticket.WaitTurnAsync(ct).ConfigureAwait(false);
+                    return await work(ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    ticket.Release();
+                }
+            }, default, context);
+            if (job == null) ticket.Release();
+            return job;
+        }
     }
 
     public static Task<T>? TryQueueDb<T>(string operation, Func<CancellationToken, Task<T>> work,

@@ -155,12 +155,16 @@ public partial class CS2_SimpleAdmin
     /// dropped. The server id and the caller's identity are captured <b>now</b>, on the game thread, and travel with
     /// the job: the job never reads the mutable global server id or a controller later.
     /// </summary>
+    /// <param name="orderKey">
+    /// SteamID64 of the player the write is about. Writes with the same key run in the order in which they were
+    /// accepted, even on a multi-worker queue (see <see cref="KeyedSequencer"/>); null = no ordering requirement.
+    /// </param>
     internal static bool TryQueuePenaltyWork(CCSPlayerController? caller, CommandInfo? command, string operation,
-        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server) =>
-        TryQueuePenaltyWork(CallerRef.Capture(caller), command, operation, work, scope);
+        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server, ulong? orderKey = null) =>
+        TryQueuePenaltyWork(CallerRef.Capture(caller), command, operation, work, scope, orderKey);
 
     internal static bool TryQueuePenaltyWork(CallerRef caller, CommandInfo? command, string operation,
-        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server)
+        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server, ulong? orderKey = null)
     {
         if (!EnsureDatabaseReady(command, scope))
         {
@@ -178,7 +182,11 @@ public partial class CS2_SimpleAdmin
             return false;
         }
 
-        if (Runtime.TryQueueDb(operation, work, new WorkContext(Runtime.Context, serverId, caller))) return true;
+        var context = new WorkContext(Runtime.Context, serverId, caller);
+        if (orderKey is { } key
+                ? Runtime.TryQueueDbOrdered(operation, work, context, key)
+                : Runtime.TryQueueDb(operation, work, context))
+            return true;
 
         const string message = "[CS2-SimpleAdmin] Database queue is full or unavailable - the action was NOT saved. Try again.";
         if (command != null)

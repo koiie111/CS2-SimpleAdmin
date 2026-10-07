@@ -65,7 +65,7 @@ internal static class PeriodicMaintenance
                 var isMuted = PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Mute, out _);
                 var isSilenced = PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out _);
                 if (!isMuted && !isSilenced)
-                    player.VoiceFlags = VoiceFlags.Normal;
+                    player.VoiceFlags = PenaltyRemoval.WithoutMuted(player.VoiceFlags); // only the penalty's own bit; other voice flags are not its business
             }
 
             PlayerPenaltyManager.RemoveExpiredPenalties();
