@@ -35,7 +35,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
             {
                 playerSteamid = player.SteamId.SteamId64,
                 playerName = player.Name,
-                playerIp = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 1 ? player.IpAddress : null,
+                playerIp = CS2_SimpleAdmin.CurrentConfig.OtherSettings.BanType == 1 ? player.IpAddress : null,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
                 adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 banReason = reason,
@@ -46,7 +46,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
             });
 
             if (banId != null)
-                _lastBans[banId.Value] = (now, futureTime, CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 1 ? player.IpAddress : null);
+                _lastBans[banId.Value] = (now, futureTime, CS2_SimpleAdmin.CurrentConfig.OtherSettings.BanType == 1 ? player.IpAddress : null);
             return banId;
         }
         catch(Exception ex)
@@ -176,9 +176,9 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
 //         {
 //             string sql;
 //             
-//             if (CS2_SimpleAdmin.Instance.Config.OtherSettings.CheckMultiAccountsByIp && !CS2_SimpleAdmin.Instance.Config.OtherSettings.IgnoredIps.Contains(player.IpAddress))
+//             if (CS2_SimpleAdmin.CurrentConfig.OtherSettings.CheckMultiAccountsByIp && !CS2_SimpleAdmin.CurrentConfig.OtherSettings.IgnoredIps.Contains(player.IpAddress))
 //             {
-//                 sql = CS2_SimpleAdmin.Instance.Config.MultiServerMode ? """
+//                 sql = CS2_SimpleAdmin.CurrentConfig.MultiServerMode ? """
 //                                                                             SELECT COALESCE((
 //                                                                                 SELECT COUNT(*)
 //                                                                                 FROM sa_bans
@@ -230,7 +230,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
 //             }
 //             else
 //             {
-//                 sql = CS2_SimpleAdmin.Instance.Config.MultiServerMode ? """
+//                 sql = CS2_SimpleAdmin.CurrentConfig.MultiServerMode ? """
 //                                                                             UPDATE sa_bans
 //                                                                             SET player_ip = CASE WHEN player_ip IS NULL THEN @PlayerIP ELSE player_ip END,
 //                                                                                 player_name = CASE WHEN player_name IS NULL THEN @PlayerName ELSE player_name END
@@ -262,9 +262,9 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
 //             var parameters = new
 //             {
 //                 PlayerSteamID = player.SteamId.SteamId64,
-//                 PlayerIP = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 0 ||
+//                 PlayerIP = CS2_SimpleAdmin.CurrentConfig.OtherSettings.BanType == 0 ||
 //                            string.IsNullOrEmpty(player.IpAddress) ||
-//                            CS2_SimpleAdmin.Instance.Config.OtherSettings.IgnoredIps.Contains(player.IpAddress)
+//                            CS2_SimpleAdmin.CurrentConfig.OtherSettings.IgnoredIps.Contains(player.IpAddress)
 //                     ? null
 //                     : player.IpAddress,
 //                 PlayerName = !string.IsNullOrEmpty(player.Name) ? player.Name : string.Empty,
@@ -292,7 +292,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
 //         {
 //             string sql;
 //
-//             sql = CS2_SimpleAdmin.Instance.Config.MultiServerMode
+//             sql = CS2_SimpleAdmin.CurrentConfig.MultiServerMode
 //                 ? "SELECT COUNT(*) FROM sa_bans WHERE (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP)"
 //                 : "SELECT COUNT(*) FROM sa_bans WHERE (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP) AND server_id = @serverid";
 //
@@ -300,7 +300,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
 //
 //             await using var connection = await database.GetConnectionAsync();
 //
-//             if (CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType > 0 && !string.IsNullOrEmpty(player.IpAddress))
+//             if (CS2_SimpleAdmin.CurrentConfig.OtherSettings.BanType > 0 && !string.IsNullOrEmpty(player.IpAddress))
 //             {
 //                 banCount = await connection.ExecuteScalarAsync<int>(sql,
 //                     new
@@ -345,7 +345,7 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
     try
     {
         await using var connection = await databaseProvider.CreateConnectionAsync();
-        var sqlRetrieveBans = databaseProvider.GetUnbanRetrieveBansQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+        var sqlRetrieveBans = databaseProvider.GetUnbanRetrieveBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
 
         var bans = await connection.QueryAsync(sqlRetrieveBans, new { pattern = playerPattern, serverid = CS2_SimpleAdmin.ServerId });
         var bansList = bans as dynamic[] ?? bans.ToArray();
@@ -403,7 +403,7 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
     //     try
     //     {
     //         await using var connection = await database.GetConnectionAsync();
-    //         bool checkIpBans = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType > 0;
+    //         bool checkIpBans = CS2_SimpleAdmin.CurrentConfig.OtherSettings.BanType > 0;
     //
     //         var filteredPlayers = players.Where(p => p.UserId.HasValue).ToList();
     //
@@ -417,7 +417,7 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
     //         var sql = new StringBuilder();
     //         sql.Append("SELECT `player_steamid`, `player_ip` FROM `sa_bans` WHERE `status` = 'ACTIVE' ");
     //
-    //         if (CS2_SimpleAdmin.Instance.Config.MultiServerMode)
+    //         if (CS2_SimpleAdmin.CurrentConfig.MultiServerMode)
     //         {
     //             sql.Append("AND (player_steamid IN @SteamIDs ");
     //             if (checkIpBans && ipAddresses.Count != 0)
@@ -477,12 +477,12 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
         try
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
-            var sql = databaseProvider.GetExpireBansQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+            var sql = databaseProvider.GetExpireBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
             await connection.ExecuteAsync(sql, new { currentTime, serverid = CS2_SimpleAdmin.ServerId });
-            if (CS2_SimpleAdmin.Instance.Config.OtherSettings.ExpireOldIpBans > 0)
+            if (CS2_SimpleAdmin.CurrentConfig.OtherSettings.ExpireOldIpBans > 0)
             {
-                var ipBansTime = currentTime.AddDays(-CS2_SimpleAdmin.Instance.Config.OtherSettings.ExpireOldIpBans);
-                sql = databaseProvider.GetExpireIpBansQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+                var ipBansTime = currentTime.AddDays(-CS2_SimpleAdmin.CurrentConfig.OtherSettings.ExpireOldIpBans);
+                sql = databaseProvider.GetExpireIpBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
                 await connection.ExecuteAsync(sql, new { ipBansTime, CS2_SimpleAdmin.ServerId });
 
                 sql = databaseProvider.GetExpireOldPlayerIpsQuery();

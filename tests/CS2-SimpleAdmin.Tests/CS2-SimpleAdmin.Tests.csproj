@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>CS2_SimpleAdmin.Tests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- The plugin references CSS compile-only; tests need the managed assembly at run time (no native calls are made) -->
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.369" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CS2-SimpleAdmin\CS2-SimpleAdmin.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MenuManagerApi">
+      <HintPath>..\..\CS2-SimpleAdmin\3rd_party\MenuManagerApi.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\CS2-SimpleAdmin\Database\Migrations\**\*.sql" LinkBase="Migrations" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

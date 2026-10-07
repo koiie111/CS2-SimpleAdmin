@@ -1180,7 +1180,7 @@ public static class Time
 
     public static DateTime ActualDateTime()
     {
-        var config = CS2_SimpleAdmin.Instance.Config;
+        var config = CS2_SimpleAdmin.CurrentConfig;
         var resolved = _resolved;
         // string.Equals short-circuits on the same reference, so the steady state costs two pointer compares
         if (resolved == null ||

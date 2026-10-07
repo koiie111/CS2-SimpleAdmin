@@ -13,3 +13,5 @@ CLAUDE.md
 /Modules/CS2-SimpleAdmin_BanSoundModule
 /Modules/CS2-SimpleAdmin_StealthModule/METAMOD PLUGIN
 .claude/
+tests/**/bin/
+tests/**/obj/

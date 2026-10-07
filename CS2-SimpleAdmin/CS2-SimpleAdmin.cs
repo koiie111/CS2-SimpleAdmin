@@ -18,7 +18,25 @@ namespace CS2_SimpleAdmin;
 [MinimumApiVersion(369)]
 public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdminConfig>
 {
-    internal static CS2_SimpleAdmin Instance { get; private set; } = new();
+    // Set by the constructor CSS calls. It used to be "= new()": the static initializer then built a second plugin
+    // object whose BasePlugin constructor registered listeners with CSS on every (re)load.
+    internal static CS2_SimpleAdmin Instance { get; private set; } = null!;
+
+    public CS2_SimpleAdmin()
+    {
+        Instance = this;
+    }
+
+    private static CS2_SimpleAdminConfig? _configWithoutPlugin;
+
+    /// <summary>
+    /// Config of the running plugin. Code that has no plugin instance (unit tests, tools) gets a config set via
+    /// <see cref="UseConfigWithoutPlugin"/>.
+    /// </summary>
+    internal static CS2_SimpleAdminConfig CurrentConfig =>
+        (Instance as CS2_SimpleAdmin)?.Config ?? _configWithoutPlugin ?? throw new InvalidOperationException("plugin not loaded");
+
+    internal static void UseConfigWithoutPlugin(CS2_SimpleAdminConfig config) => _configWithoutPlugin = config;
 
     public override string ModuleName => "CS2-SimpleAdmin" + (Helper.IsDebugBuild ? " (DEBUG)" : " (RELEASE)");
     public override string ModuleDescription => "Simple admin plugin for Counter-Strike 2 :)";

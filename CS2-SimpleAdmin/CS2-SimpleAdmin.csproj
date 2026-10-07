@@ -34,6 +34,11 @@
   <ItemGroup>
     <ProjectReference Include="..\CS2-SimpleAdminApi\CS2-SimpleAdminApi.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CS2-SimpleAdmin.Tests" />
+    <InternalsVisibleTo Include="CS2-SimpleAdmin.Bench" />
+  </ItemGroup>
 <ItemGroup>
 	<None Update="lang\**\*.*" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>

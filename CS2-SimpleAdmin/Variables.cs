@@ -22,7 +22,7 @@ public partial class CS2_SimpleAdmin
     internal static readonly HttpClient HttpClient = new();
 
     // Paths
-    internal static readonly string ConfigDirectory =
+    internal static string ConfigDirectory =>
         Path.Combine(Application.RootDirectory, "configs/plugins/CS2-SimpleAdmin");
 
     // Localization
@@ -33,7 +33,7 @@ public partial class CS2_SimpleAdmin
     public static bool VoteInProgress;
 
     // Command and Server Settings
-    public static readonly bool UnlockedCommands = CoreConfig.UnlockConCommands;
+    public static bool UnlockedCommands => CoreConfig.UnlockConCommands;
     internal static string IpAddress = string.Empty;
     // Written on the game thread (MarkReady), read from background work
     internal static volatile bool ServerLoaded;

@@ -52,7 +52,7 @@ public static class PlayerPenaltyManager
     private const int TypeCount = (int)PenaltyType.Warn + 1;
     private static readonly SlotPenalties?[] Slots = new SlotPenalties?[PlayerSessions.MaxSlots];
 
-    private static int CurrentTimeMode => CS2_SimpleAdmin.Instance.Config.OtherSettings.TimeMode;
+    private static int CurrentTimeMode => CS2_SimpleAdmin.CurrentConfig.OtherSettings.TimeMode;
 
     private static void Update(int slot, Func<SlotPenalties, SlotPenalties?> change)
     {

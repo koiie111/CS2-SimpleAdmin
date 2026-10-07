@@ -131,7 +131,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             await using var connection = await databaseProvider.CreateConnectionAsync();
             var currentTime = Time.ActualDateTime();
             
-            var sql = databaseProvider.GetIsMutedQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode, CS2_SimpleAdmin.Instance.Config.OtherSettings.TimeMode);
+            var sql = databaseProvider.GetIsMutedQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode, CS2_SimpleAdmin.CurrentConfig.OtherSettings.TimeMode);
             
             var parameters = new { PlayerSteamID = steamId, CurrentTime = currentTime, serverid = CS2_SimpleAdmin.ServerId };
             var activeMutes = (await connection.QueryAsync(sql, parameters)).ToList();
@@ -160,7 +160,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
         if (databaseProvider == null) return (0,0,0);
 
         await using var connection = await databaseProvider.CreateConnectionAsync();
-        var sql = databaseProvider.GetMuteStatsQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+        var sql = databaseProvider.GetMuteStatsQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
         var result = await connection.QuerySingleAsync<Models.MuteStats>(sql, new
         {
             PlayerSteamID = playerInfo.SteamId.SteamId64,
@@ -264,7 +264,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             };
 
             var sqlRetrieveMutes =
-                databaseProvider.GetRetrieveMutesQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
+                databaseProvider.GetRetrieveMutesQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
             var mutes = await connection.QueryAsync(sqlRetrieveMutes, new { pattern = playerPattern, muteType, serverid = CS2_SimpleAdmin.ServerId });
 
             var mutesList = mutes as dynamic[] ?? mutes.ToArray();
@@ -305,7 +305,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
         try
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
-            var sql = databaseProvider.GetExpireMutesQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode, CS2_SimpleAdmin.Instance.Config.OtherSettings.TimeMode);
+            var sql = databaseProvider.GetExpireMutesQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode, CS2_SimpleAdmin.CurrentConfig.OtherSettings.TimeMode);
             await connection.ExecuteAsync(sql, new { CurrentTime = Time.ActualDateTime(), serverid = CS2_SimpleAdmin.ServerId });
         }
         catch (Exception ex)

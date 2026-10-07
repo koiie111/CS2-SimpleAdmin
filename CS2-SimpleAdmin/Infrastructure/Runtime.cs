@@ -84,6 +84,26 @@ internal static class Runtime
 
     public static CancellationToken Token => Lifetime.Token;
 
+    /// <summary>Tests/tools: run with a dispatcher that is pumped manually instead of by the engine.</summary>
+    internal static void UseDispatcher(GameDispatcher dispatcher)
+    {
+        lock (StartLock) Dispatcher = dispatcher;
+    }
+
+    /// <summary>Tests: a fresh lifetime and queues.</summary>
+    internal static void ResetForTests(bool sqlite, GameDispatcher dispatcher)
+    {
+        Stop();
+        lock (StartLock)
+        {
+            Lifetime = new PluginLifetime();
+            Dispatcher = dispatcher;
+            State = PluginState.Ready;
+        }
+
+        Start(sqlite);
+    }
+
     /// <summary>Runs <paramref name="action"/> on the game thread (bounded, budgeted). Use from background code.</summary>
     public static Task OnGameThread(Action action) => Dispatcher.PostAsync(action, Lifetime.Token);
 
