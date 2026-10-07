@@ -187,15 +187,22 @@ public static class RegisterCommands
         {
             foreach (var command in commandsConfig.Commands)
             {
-                if (command.Value.Aliases == null) continue;
+                // fork: `"css_x": null` (or null aliases) in a hand-edited Commands.json used to throw a
+                // NullReferenceException here and abort registration of every command after it.
+                var aliases = command.Value?.Aliases?.Where(a => !string.IsNullOrWhiteSpace(a)).ToArray();
+                if (aliases == null)
+                {
+                    CS2_SimpleAdmin._logger?.LogWarning($"Commands.json: `{command.Key}` has no aliases, skipped");
+                    continue;
+                }
             
                 CS2_SimpleAdmin._logger?.LogInformation(
-                    $"Registering command: `{command.Key}` with aliases: `{string.Join(", ", command.Value.Aliases)}`");
+                    $"Registering command: `{command.Key}` with aliases: `{string.Join(", ", aliases)}`");
             
                 var mapping = CommandMappings.FirstOrDefault(m => m.CommandKey == command.Key);
-                if (mapping == null || command.Value.Aliases.Length == 0) continue;
+                if (mapping == null || aliases.Length == 0) continue;
             
-                foreach (var alias in command.Value.Aliases)
+                foreach (var alias in aliases)
                 {
                     CS2_SimpleAdmin.Instance.AddCommand(alias, "", mapping.Callback);
                 }
