@@ -117,6 +117,29 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         }
     }
 
+    /// <summary>Warns shown per page of the css_warns menu: the game thread builds at most this many options.</summary>
+    internal const int MenuPageSize = 8;
+
+    /// <summary>
+    /// One page of a player's warns for the menu (fixed page size, stable order, reason cut in SQL). Runs on a DB
+    /// worker. Unlike <see cref="GetPlayerWarns"/> a database error propagates, so the caller can tell the admin.
+    /// </summary>
+    internal async Task<(int Total, List<Models.WarnMenuRow> Rows)> GetPlayerWarnsPageAsync(ulong steamId, bool multiServer,
+        int? serverId, int page, int pageSize, CancellationToken ct)
+    {
+        if (databaseProvider == null) return (0, []);
+        page = Math.Max(1, page);
+        await using var connection = await databaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false);
+        var total = Convert.ToInt32(await connection.ExecuteScalarAsync<object>(new CommandDefinition(
+            databaseProvider.GetWarnsMenuCountQuery(multiServer), new { PlayerSteamID = steamId, serverid = serverId },
+            cancellationToken: ct)).ConfigureAwait(false));
+        var rows = (await connection.QueryAsync<Models.WarnMenuRow>(new CommandDefinition(
+            databaseProvider.GetWarnsMenuPageQuery(multiServer),
+            new { PlayerSteamID = steamId, serverid = serverId, limit = pageSize, offset = (page - 1) * pageSize },
+            cancellationToken: ct)).ConfigureAwait(false)).AsList();
+        return (total, rows);
+    }
+
     /// <summary>
     /// Retrieves the count of warnings for a player specified by SteamID.
     /// </summary>

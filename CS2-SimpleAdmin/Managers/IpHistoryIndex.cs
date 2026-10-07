@@ -13,6 +13,13 @@ namespace CS2_SimpleAdmin.Managers;
 /// <see cref="CompactThreshold"/> keys the next update folds it into a new base (rare, background).
 /// </para>
 /// Nothing is mutated after construction; every update returns a new instance sharing the unchanged parts.
+/// <para>
+/// Removal: <see cref="With"/> only merges, so links that disappeared from SQL (the ExpireOldIpBans job, the site,
+/// manual DELETEs) must be removed explicitly, in <b>both</b> directions (account → IPs and IP → accounts):
+/// <see cref="Prune"/> drops records older than a cutoff for a bounded slice of accounts per call, and the cache
+/// rebuilds the index when a checksum against SQL detects a deletion that has no time rule. An emptied entry is stored
+/// in the overlay as an empty array (a tombstone shadowing the base) and disappears at the next compaction.
+/// </para>
 /// </summary>
 internal sealed class IpHistoryIndex
 {
@@ -33,8 +40,23 @@ internal sealed class IpHistoryIndex
         _baseAccounts = baseAccounts;
         _overlayIps = overlayIps;
         _overlayAccounts = overlayAccounts;
-        AccountCount = baseIps.Count + overlayIps.Keys.Count(k => !baseIps.ContainsKey(k));
-        AddressCount = baseAccounts.Count + overlayAccounts.Keys.Count(k => !baseAccounts.ContainsKey(k));
+        AccountCount = CountKeys(baseIps, overlayIps);
+        AddressCount = CountKeys(baseAccounts, overlayAccounts);
+    }
+
+    /// <summary>Distinct non-empty keys of base ∪ overlay (an empty overlay value hides the base key).</summary>
+    private static int CountKeys<TKey, TValue>(Dictionary<TKey, TValue[]> baseMap, ImmutableDictionary<TKey, TValue[]> overlay)
+        where TKey : notnull
+    {
+        var count = baseMap.Count;
+        foreach (var (key, value) in overlay)
+        {
+            var inBase = baseMap.ContainsKey(key);
+            if (value.Length == 0) { if (inBase) count--; }
+            else if (!inBase) count++;
+        }
+
+        return count;
     }
 
     public int AccountCount { get; }
@@ -43,14 +65,106 @@ internal sealed class IpHistoryIndex
 
     public bool TryGetIps(ulong steamId, out IpRecord[] records)
     {
-        if (_overlayIps.TryGetValue(steamId, out records!)) return true;
+        if (_overlayIps.TryGetValue(steamId, out records!)) return records.Length > 0; // empty = removed
         return _baseIps.TryGetValue(steamId, out records!);
     }
 
     public bool TryGetAccounts(uint ip, out ulong[] accounts)
     {
-        if (_overlayAccounts.TryGetValue(ip, out accounts!)) return true;
+        if (_overlayAccounts.TryGetValue(ip, out accounts!)) return accounts.Length > 0;
         return _baseAccounts.TryGetValue(ip, out accounts!);
+    }
+
+    /// <summary>When this account last used this IP, per the account's own record.</summary>
+    public bool TryGetUsedAt(ulong steamId, uint ip, out DateTime usedAt)
+    {
+        if (TryGetIps(steamId, out var records))
+            foreach (var r in records)
+                if (r.Ip == ip)
+                {
+                    usedAt = r.UsedAt;
+                    return true;
+                }
+
+        usedAt = default;
+        return false;
+    }
+
+    /// <summary>Every account with at least one record (O(accounts); used to start a prune sweep).</summary>
+    public ulong[] AccountIds()
+    {
+        var ids = new List<ulong>(AccountCount);
+        foreach (var key in _baseIps.Keys)
+            if (!_overlayIps.TryGetValue(key, out var shadow) || shadow.Length > 0) ids.Add(key);
+        foreach (var (key, value) in _overlayIps)
+            if (value.Length > 0 && !_baseIps.ContainsKey(key)) ids.Add(key);
+        return ids.ToArray();
+    }
+
+    /// <summary>
+    /// Count and sums over the records newer than <paramref name="cutoff"/> (the same triple SQL computes with
+    /// COUNT/SUM over sa_players_ips), to detect rows deleted behind the cache's back. O(records), allocation-free;
+    /// run on a background thread only, rarely.
+    /// </summary>
+    public (long Count, long SteamSum, long AddressSum) Checksum(DateTime cutoff)
+    {
+        long count = 0, steamSum = 0, addressSum = 0;
+        foreach (var (steam, records) in _baseIps)
+        {
+            if (_overlayIps.ContainsKey(steam)) continue;
+            Accumulate(steam, records);
+        }
+
+        foreach (var (steam, records) in _overlayIps) Accumulate(steam, records);
+        return (count, steamSum, addressSum);
+
+        void Accumulate(ulong steam, IpRecord[] records)
+        {
+            foreach (var r in records)
+            {
+                if (r.UsedAt <= cutoff) continue;
+                count++;
+                steamSum += (long)steam;
+                addressSum += r.Ip;
+            }
+        }
+    }
+
+    /// <summary>
+    /// New index without the records of <paramref name="accounts"/> that are not newer than <paramref name="cutoff"/>,
+    /// removed from both directions. Returns this if nothing was removed. Cost O(accounts · own records), so the
+    /// caller bounds the slice; never scans the whole index.
+    /// </summary>
+    public IpHistoryIndex Prune(DateTime cutoff, ReadOnlySpan<ulong> accounts)
+    {
+        ImmutableDictionary<ulong, IpRecord[]>.Builder? overlayIps = null;
+        ImmutableDictionary<uint, ulong[]>.Builder? overlayAccounts = null;
+        foreach (var steamId in accounts)
+        {
+            if (!TryGetIps(steamId, out var current)) continue;
+            var kept = 0;
+            foreach (var r in current)
+                if (r.UsedAt > cutoff) kept++;
+            if (kept == current.Length) continue;
+
+            overlayIps ??= _overlayIps.ToBuilder();
+            overlayAccounts ??= _overlayAccounts.ToBuilder();
+            var survivors = new IpRecord[kept];
+            var n = 0;
+            foreach (var r in current)
+            {
+                if (r.UsedAt > cutoff) { survivors[n++] = r; continue; }
+                var owners = overlayAccounts.TryGetValue(r.Ip, out var oa) ? oa
+                    : _baseAccounts.TryGetValue(r.Ip, out var ba) ? ba : [];
+                overlayAccounts[r.Ip] = owners.Where(o => o != steamId).ToArray(); // empty = removed
+            }
+
+            overlayIps[steamId] = survivors; // empty = removed
+        }
+
+        if (overlayIps == null) return this;
+        var next = new IpHistoryIndex(_baseIps, _baseAccounts, overlayIps.ToImmutable(), overlayAccounts!.ToImmutable());
+        return next.OverlayCount > CompactThreshold ? next.Compact() : next;
     }
 
     /// <summary>Builds a base from any number of rows (any order, duplicates allowed; latest used_at per (account, ip) wins).</summary>
@@ -136,9 +250,11 @@ internal sealed class IpHistoryIndex
     public IpHistoryIndex Compact()
     {
         var ips = new Dictionary<ulong, IpRecord[]>(_baseIps);
-        foreach (var (k, v) in _overlayIps) ips[k] = v;
+        foreach (var (k, v) in _overlayIps)
+            if (v.Length > 0) ips[k] = v; else ips.Remove(k);
         var accounts = new Dictionary<uint, ulong[]>(_baseAccounts);
-        foreach (var (k, v) in _overlayAccounts) accounts[k] = v;
+        foreach (var (k, v) in _overlayAccounts)
+            if (v.Length > 0) accounts[k] = v; else accounts.Remove(k);
         return new IpHistoryIndex(ips, accounts, ImmutableDictionary<ulong, IpRecord[]>.Empty, ImmutableDictionary<uint, ulong[]>.Empty);
     }
 }

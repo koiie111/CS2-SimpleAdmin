@@ -37,6 +37,7 @@ public class CS2_SimpleAdmin_StealthModule: BasePlugin, IPluginConfig<PluginConf
     public override void Load(bool hotReload)
     {
         RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        RegisterListener<Listeners.OnMapStart>(OnMapStart);
 
         try
         {
@@ -61,9 +62,23 @@ public class CS2_SimpleAdmin_StealthModule: BasePlugin, IPluginConfig<PluginConf
         }
     }
 
+    /// <summary>
+    /// Controllers are recreated on a map change but no disconnect event is raised for the old ones; keeping them would
+    /// leave entries that point at freed entities. player_connect_full adds the new controllers again.
+    /// </summary>
+    private void OnMapStart(string mapName)
+    {
+        Players.Clear();
+        Array.Clear(_isTrackedRecipient);
+        _observerIndices = [];
+        _observerOwnerSlots = [];
+        _indicesDirty = true;
+    }
+
     public override void Unload(bool hotReload)
     {
         RemoveListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        RemoveListener<Listeners.OnMapStart>(OnMapStart);
         if (_sharedApi != null && _subscribedToggleSilent)
             _sharedApi.OnAdminToggleSilent -= OnAdminToggleSilent;
         _subscribedToggleSilent = false;
@@ -162,9 +177,12 @@ public class CS2_SimpleAdmin_StealthModule: BasePlugin, IPluginConfig<PluginConf
         var inner = (nint*)infolist.Handle;
         var count = (int)*(inner + 1);
         var infos = *(nint**)inner;
+        // A layout that no longer matches CounterStrikeSharp's would show up as garbage here: do nothing rather than walk it
+        if (infos == null || (uint)count > MaxSlots) return;
         for (var i = 0; i < count; i++)
         {
             var infoPtr = *(infos + i);
+            if (infoPtr == 0) continue;
             var slot = *(int*)((byte*)infoPtr + _slotOffset);
             if ((uint)slot >= MaxSlots || !_isTrackedRecipient[slot]) continue; // HLTV / untracked (was: null or IsHLTV)
             var info = *(CCheckTransmitInfo*)infoPtr;

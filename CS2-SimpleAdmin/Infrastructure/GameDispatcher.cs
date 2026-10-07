@@ -9,7 +9,9 @@ namespace CS2_SimpleAdmin.Infrastructure;
 /// Only one pump is scheduled into CounterStrikeSharp's world-update queue at a time, and a pump runs at most
 /// <see cref="MaxItemsPerUpdate"/> items or <see cref="BudgetTicks"/> of wall time, whichever comes first;
 /// leftovers continue on the next world update. A budget cannot interrupt a running item, native call or GC,
-/// so every posted item must itself be small (callers split large outputs into chunks).
+/// so every posted item must itself be small (callers split large outputs into chunks). The budget is therefore
+/// <b>not</b> an upper bound of a pump's wall time: items longer than the budget are counted in
+/// <c>DispatcherOverBudgetItems</c> and visible in the <c>game.dispatcher_item</c> max.
 /// </para>
 /// <para>
 /// Producers: <see cref="TryPost"/> never blocks (used on the game thread; returns false when full);
@@ -130,6 +132,11 @@ internal sealed class GameDispatcher
                 item.Action();
                 item.Completion?.TrySetResult();
             }
+            catch (OperationCanceledException) when (item.Completion != null)
+            {
+                // The producer's runtime context ended before the item ran: not an error, just a cancelled result
+                item.Completion.TrySetCanceled();
+            }
             catch (Exception ex)
             {
                 if (item.Completion != null)
@@ -139,7 +146,10 @@ internal sealed class GameDispatcher
             }
 
             var now = Stopwatch.GetTimestamp();
-            PluginMetrics.DispatcherItem.Record(now - itemStart);
+            var itemTicks = now - itemStart;
+            PluginMetrics.DispatcherItem.Record(itemTicks);
+            // The budget below is checked only BETWEEN items; an item that alone exceeds it is the real stall
+            if (itemTicks > BudgetTicks) Interlocked.Increment(ref PluginMetrics.DispatcherOverBudgetItems);
             if (now - start >= BudgetTicks) break;
         }
 

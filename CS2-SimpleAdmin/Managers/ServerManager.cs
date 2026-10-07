@@ -82,35 +82,39 @@ public class ServerManager
     private static async Task LoadAsync(string address, string? ipAddress, string hostname, string rconPassword)
     {
         var plugin = CS2_SimpleAdmin.Instance;
-        var token = Runtime.Token;
+        // Startup belongs to the lifetime that began it: everything below (queue, game-thread posts, server id, state)
+        // goes through this context, so after a restart it cannot reach into the new lifetime.
+        var context = Runtime.Context;
+        var token = context.Token;
         try
         {
             if (!await plugin.DatabaseInitTask.ConfigureAwait(false))
             {
-                await ReleaseLoadingAsync().ConfigureAwait(false);
+                await ReleaseLoadingAsync(context).ConfigureAwait(false);
                 return;
             }
 
-            var serverId = await WithRetries("server-row", ct => ResolveServerIdAsync(address, hostname, rconPassword, ct))
+            var serverId = await WithRetries(context, "server-row", ct => ResolveServerIdAsync(address, hostname, rconPassword, ct))
                 .ConfigureAwait(false);
-            CS2_SimpleAdmin.ServerId = serverId;
+            if (!Runtime.TrySetServerId(context, serverId)) throw new OperationCanceledException(token);
             CS2_SimpleAdmin._logger?.LogInformation("Loaded server with ip {ip}", ipAddress);
 
             var cache = plugin.CacheManager;
             if (cache != null)
             {
                 var config = plugin.Config;
-                await WithRetries("cache-init", async ct =>
+                await WithRetries(context, "cache-init", async ct =>
                 {
                     await cache.InitializeCacheAsync(config, serverId, ct).ConfigureAwait(false);
                     return true;
                 }).ConfigureAwait(false);
             }
 
-            await LoadRenamesAsync().ConfigureAwait(false);
-            await plugin.ReloadAdminsAsync().ConfigureAwait(false);
+            await LoadRenamesAsync(context).ConfigureAwait(false);
+            // A failed admin load is not a ready plugin: retried a bounded number of times, then startup fails
+            await ReloadAdminsWithRetriesAsync(plugin.ReloadAdminsAsync, context).ConfigureAwait(false);
 
-            await Runtime.OnGameThread(plugin.MarkReady).ConfigureAwait(false);
+            await context.PostAsync(plugin.MarkReady).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -119,20 +123,21 @@ public class ServerManager
         catch (Exception ex)
         {
             CS2_SimpleAdmin._logger?.LogCritical("Unable to load server data: " + ex.Message);
-            Runtime.State = PluginState.Failed;
-            Runtime.LastError = ex.Message;
+            if (!Runtime.TrySetState(context, PluginState.Failed, ex.Message)) return; // a newer lifetime owns the state now
             try
             {
                 // Same fallback as before: global admins and renames still work without a server row
-                await LoadRenamesAsync().ConfigureAwait(false);
-                await plugin.ReloadAdminsAsync().ConfigureAwait(false);
+                await LoadRenamesAsync(context).ConfigureAwait(false);
+                var fallback = await plugin.ReloadAdminsAsync().ConfigureAwait(false);
+                if (fallback != AdminReloadResult.Success)
+                    CS2_SimpleAdmin._logger?.LogError("Fallback admin load ended with {result}; existing permissions are kept", fallback);
             }
             catch (Exception inner)
             {
                 RateLimitedLog.Error("init.fallback", inner, "Fallback admin load failed");
             }
 
-            await ReleaseLoadingAsync().ConfigureAwait(false);
+            await ReleaseLoadingAsync(context).ConfigureAwait(false);
             return;
         }
 
@@ -152,11 +157,12 @@ public class ServerManager
     private static async Task LoadWithoutServerRowAsync()
     {
         var plugin = CS2_SimpleAdmin.Instance;
+        var context = Runtime.Context;
         try
         {
             if (!await plugin.DatabaseInitTask.ConfigureAwait(false)) return;
-            await LoadRenamesAsync().ConfigureAwait(false);
-            await plugin.ReloadAdminsAsync().ConfigureAwait(false);
+            await LoadRenamesAsync(context).ConfigureAwait(false);
+            await ReloadAdminsWithRetriesAsync(plugin.ReloadAdminsAsync, context).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -190,23 +196,52 @@ public class ServerManager
         return serverId.Value;
     }
 
-    private static async Task LoadRenamesAsync()
+    private static async Task LoadRenamesAsync(RuntimeContext context)
     {
-        var rows = await (Runtime.TryQueueDb("renames-load", CS2_SimpleAdmin.PlayerManager.LoadRenamedPlayersAsync)
-                          ?? throw new InvalidOperationException("database queue full")).ConfigureAwait(false);
-        await Runtime.OnGameThread(() =>
+        var rows = await (context.TryQueueDb<List<(ulong SteamId, string Name)>>("renames-load",
+                              CS2_SimpleAdmin.PlayerManager.LoadRenamedPlayersAsync)
+                          ?? throw StartupRefused(context)).ConfigureAwait(false);
+        await context.PostAsync(() =>
         {
             foreach (var (steamId, name) in rows)
                 CS2_SimpleAdmin.RenamedPlayers[steamId] = name;
         }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Startup step: reload admins until it succeeds, a bounded number of times. Canceled → cancellation; still failing
+    /// after the retries → exception (startup then reports Failed instead of declaring the plugin ready).
+    /// </summary>
+    internal static async Task ReloadAdminsWithRetriesAsync(Func<Task<AdminReloadResult>> reload, RuntimeContext context,
+        IReadOnlyList<TimeSpan>? delays = null)
+    {
+        delays ??= StepRetryDelays;
+        for (var attempt = 0; ; attempt++)
+        {
+            switch (await reload().ConfigureAwait(false))
+            {
+                case AdminReloadResult.Success:
+                    return;
+                case AdminReloadResult.Canceled:
+                    throw new OperationCanceledException(context.Token);
+            }
+
+            if (attempt >= delays.Count)
+                throw new InvalidOperationException("admins/groups could not be loaded (see log); permissions were not replaced");
+            RateLimitedLog.Warning("init.admins", $"Admin reload failed (attempt {attempt + 1}), retrying");
+            await Task.Delay(delays[attempt], context.Token).ConfigureAwait(false);
+        }
+    }
+
+    private static Exception StartupRefused(RuntimeContext context) =>
+        context.IsCurrent ? new InvalidOperationException("database queue full") : new OperationCanceledException(context.Token);
+
     /// <summary>Runs a startup step on the DB queue with a small bounded number of retries.</summary>
-    private static async Task<T> WithRetries<T>(string operation, Func<CancellationToken, Task<T>> step)
+    private static async Task<T> WithRetries<T>(RuntimeContext context, string operation, Func<CancellationToken, Task<T>> step)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var job = Runtime.TryQueueDb(operation, step) ?? throw new InvalidOperationException("database queue full");
+            var job = context.TryQueueDb(operation, step) ?? throw StartupRefused(context);
             try
             {
                 return await job.ConfigureAwait(false);
@@ -214,11 +249,11 @@ public class ServerManager
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < StepRetryDelays.Length)
             {
                 RateLimitedLog.Warning($"init.{operation}", $"{operation} failed (attempt {attempt + 1}), retrying: {ex.Message}");
-                await Task.Delay(StepRetryDelays[attempt], Runtime.Token).ConfigureAwait(false);
+                await Task.Delay(StepRetryDelays[attempt], context.Token).ConfigureAwait(false);
             }
         }
     }
 
-    private static Task ReleaseLoadingAsync() =>
-        Runtime.OnGameThread(() => CS2_SimpleAdmin.Instance.ReleaseServerLoading());
+    private static Task ReleaseLoadingAsync(RuntimeContext context) =>
+        context.PostAsync(() => CS2_SimpleAdmin.Instance.ReleaseServerLoading());
 }

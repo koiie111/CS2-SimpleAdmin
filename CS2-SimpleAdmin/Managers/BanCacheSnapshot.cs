@@ -113,6 +113,17 @@ internal sealed class BanCacheSnapshot
         return ReferenceEquals(next, IpHistory) ? this : new BanCacheSnapshot(ActiveBans, next, IgnoredIps, IsInitialized);
     }
 
+    /// <summary>New generation with the IP history of a slice of accounts pruned (see <see cref="IpHistoryIndex.Prune"/>).</summary>
+    public BanCacheSnapshot WithIpPrune(DateTime cutoff, ReadOnlySpan<ulong> accounts)
+    {
+        var next = IpHistory.Prune(cutoff, accounts);
+        return ReferenceEquals(next, IpHistory) ? this : new BanCacheSnapshot(ActiveBans, next, IgnoredIps, IsInitialized);
+    }
+
+    /// <summary>New generation with the IP history replaced (rebuilt from SQL).</summary>
+    public BanCacheSnapshot WithIpIndex(IpHistoryIndex index) =>
+        new(ActiveBans, index, IgnoredIps, IsInitialized);
+
     /// <summary>Builds the IP history index from a full history (used by the full load and tests).</summary>
     public static IpHistoryIndex BuildIpIndexes(IEnumerable<IpHistoryRow> rows, string unknownName) =>
         IpHistoryIndex.Build(rows.ToList(), unknownName);
@@ -183,8 +194,8 @@ internal sealed class BanCacheSnapshot
         if (ipBan != null && (expireOldIpBansDays <= 0 || ipBan.Created >= now.AddDays(-expireOldIpBansDays)))
             return new BanCheckResult(true, ipBan, BanMatch.Ip);
 
-        // Accounts that used the current IP
-        if (FindBannedOtherAccount(ip, steamId, now) is { } sharedBan)
+        // Accounts that used the current IP (their own link to it must still be inside ExpireOldIpBans)
+        if (FindBannedOtherAccount(ip, steamId, now, expireOldIpBansDays) is { } sharedBan)
             return new BanCheckResult(true, sharedBan, BanMatch.SharedIp);
 
         if (!checkMultiAccounts || !IpHistory.TryGetIps(steamId, out var ownIps))
@@ -196,34 +207,50 @@ internal sealed class BanCacheSnapshot
         foreach (var record in ownIps)
         {
             if (record.UsedAt <= historyCutoff && expireOldIpBansDays > 0) continue;
-            if (FindBannedOtherAccount(record.Ip, steamId, now) is { } historyBan)
+            if (FindBannedOtherAccount(record.Ip, steamId, now, expireOldIpBansDays) is { } historyBan)
                 return new BanCheckResult(true, historyBan, BanMatch.SharedIpHistory);
         }
 
         return BanCheckResult.NotBanned;
     }
 
-    private BanRecord? FindBannedOtherAccount(uint ip, ulong self, DateTime now)
+    /// <summary>
+    /// A banned account other than <paramref name="self"/> that uses <paramref name="ip"/>. The link counts only while
+    /// <i>that owner's own</i> record of the IP is newer than the ExpireOldIpBans cutoff, exactly as if the SQL expiry
+    /// job (which deletes older sa_players_ips rows) had already run; so the answer equals a full rebuild even before
+    /// the background prune removed the stale link from memory.
+    /// </summary>
+    private BanRecord? FindBannedOtherAccount(uint ip, ulong self, DateTime now, int expireOldIpBansDays)
     {
         if (!IpHistory.TryGetAccounts(ip, out var owners)) return null;
+        var cutoff = expireOldIpBansDays > 0 ? now.AddDays(-expireOldIpBansDays) : DateTime.MinValue;
         foreach (var other in owners)
         {
             if (other == self) continue;
+            if (!IpHistory.TryGetUsedAt(other, ip, out var usedAt)) continue; // reverse link without a forward record
+            if (expireOldIpBansDays > 0 && usedAt <= cutoff) continue;
             if (FindActiveBySteamId(other, now) is { } ban) return ban;
         }
 
         return null;
     }
 
-    public IReadOnlyList<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(uint ip)
+    /// <summary>Accounts that used <paramref name="ip"/>; links older than ExpireOldIpBans days are ignored (0 = keep all).</summary>
+    public IReadOnlyList<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(uint ip, DateTime now,
+        int expireOldIpBansDays)
     {
         if (!IpHistory.TryGetAccounts(ip, out var owners)) return [];
+        var cutoff = expireOldIpBansDays > 0 ? now.AddDays(-expireOldIpBansDays) : DateTime.MinValue;
         var result = new List<(ulong, DateTime, string)>(owners.Length);
         foreach (var owner in owners)
         {
             if (!IpHistory.TryGetIps(owner, out var records)) continue;
             foreach (var r in records)
-                if (r.Ip == ip) { result.Add((owner, r.UsedAt, r.PlayerName)); break; }
+                if (r.Ip == ip)
+                {
+                    if (expireOldIpBansDays <= 0 || r.UsedAt > cutoff) result.Add((owner, r.UsedAt, r.PlayerName));
+                    break;
+                }
         }
 
         return result;

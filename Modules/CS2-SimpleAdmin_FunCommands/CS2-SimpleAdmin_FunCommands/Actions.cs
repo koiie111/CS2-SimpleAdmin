@@ -155,7 +155,9 @@ public partial class CS2_SimpleAdmin_FunCommands
 
             Server.NextWorldUpdate(() =>
             {
-                Utilities.SetStateChanged(player.PlayerPawn.Value, "CBaseEntity", "m_CBodyComponent");
+                // The player may have left or the pawn been replaced since this was queued
+                if (player.IsValid && player.PlayerPawn.Value is { IsValid: true } pawn)
+                    Utilities.SetStateChanged(pawn, "CBaseEntity", "m_CBodyComponent");
             });
         }
 

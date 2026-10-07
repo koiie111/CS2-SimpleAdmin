@@ -194,38 +194,94 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             new { PlayerSteamID = steamId, CurrentTime = now, serverid = serverId }, cancellationToken: ct))).AsList();
     }
     
-    /// <summary>
-    /// Processes a batch of online players to update their mute status and remove expired penalties.
-    /// </summary>
-    /// <param name="players">List of tuples containing player SteamID, optional UserID, and slot index.</param>
-    /// <returns>Task representing the asynchronous operation.</returns>
-    /// <summary>
-    /// TimeMode 0: credits online minutes to the active timed mutes of online players and returns the mutes whose
-    /// online time is now used up. Set-based: one UPDATE and one SELECT per batch of up to
-    /// <see cref="OnlineBatchSize"/> SteamIDs (players grouped by the minutes credited), instead of one UPDATE and
-    /// one SELECT per player. Runs on a DB worker; the caller applies the result on the game thread.
-    /// </summary>
     internal const int OnlineBatchSize = 64;
 
+    /// <summary>Planned mute updates per compare-and-set statement (keeps statement text bounded).</summary>
+    internal const int StepsPerStatement = 200;
+
+    /// <summary>Test seam: called at named points of <see cref="CheckOnlineModeMutesAsync"/> to inject faults.</summary>
+    internal Func<string, Task>? FaultHook { get; set; }
+
+    private Task Hit(string point) => FaultHook?.Invoke(point) ?? Task.CompletedTask;
+
+    /// <summary>
+    /// TimeMode 0: credits online minutes to the active timed mutes of online players and returns the mutes whose
+    /// online time is now used up. Runs on a DB worker; the caller applies the result on the game thread.
+    /// <para>
+    /// Safe to call again with the <b>same</b> <see cref="OnlineCredit"/> objects after any failure, cancellation or
+    /// lost acknowledgement: planning happens once per credit, every write is a compare-and-set against the planned
+    /// pre-image (see <see cref="OnlineCredit"/>), so a mute is never credited twice. Set-based: one plan SELECT, one
+    /// transaction of CAS updates and one expiry SELECT per batch of <see cref="OnlineBatchSize"/>.
+    /// </para>
+    /// </summary>
     internal async Task<List<Models.ExpiredOnlineMuteRow>> CheckOnlineModeMutesAsync(
-        IReadOnlyList<(ulong SteamId, int Minutes)> credits, bool multiServer, int? serverId, CancellationToken ct)
+        IReadOnlyList<OnlineCredit> credits, bool multiServer, int? serverId, CancellationToken ct)
     {
         var expired = new List<Models.ExpiredOnlineMuteRow>();
         if (databaseProvider == null || credits.Count == 0) return expired;
 
         await using var connection = await databaseProvider.CreateConnectionAsync(ct);
-        var update = databaseProvider.GetUpdateMutePassedBatchQuery(multiServer);
-        foreach (var group in credits.Where(c => c.Minutes > 0).GroupBy(c => c.Minutes))
+
+        // 1) Plan: fix the pre/post image once. A credit that already has a plan keeps it.
+        var unplanned = credits.Where(c => c.Plan == null).ToList();
+        if (unplanned.Count > 0)
         {
-            var ids = group.Select(c => c.SteamId).Distinct().ToList();
+            var planSql = databaseProvider.GetOnlineCreditPlanQuery(multiServer);
+            var ids = unplanned.Select(c => c.SteamId).Distinct().ToList();
             for (var i = 0; i < ids.Count; i += OnlineBatchSize)
             {
-                var batch = ids.GetRange(i, Math.Min(OnlineBatchSize, ids.Count - i));
-                await connection.ExecuteAsync(new CommandDefinition(update,
-                    new { ids = batch, minutes = group.Key, serverid = serverId }, cancellationToken: ct));
+                var batchIds = ids.GetRange(i, Math.Min(OnlineBatchSize, ids.Count - i));
+                var rows = (await connection.QueryAsync<Models.OnlineCreditPlanRow>(new CommandDefinition(planSql,
+                    new { ids = batchIds, serverid = serverId }, cancellationToken: ct))).AsList();
+                foreach (var credit in unplanned)
+                {
+                    if (!batchIds.Contains(credit.SteamId)) continue;
+                    var steps = new List<OnlineCreditStep>();
+                    foreach (var row in rows)
+                    {
+                        if ((ulong)row.SteamId != credit.SteamId || row.Passed >= row.Duration) continue;
+                        var minutes = credit.EligibleMinutes(row.Created);
+                        if (minutes > 0) steps.Add(new OnlineCreditStep(row.Id, row.Passed, row.Passed + minutes));
+                    }
+
+                    credit.Plan = steps;
+                }
             }
         }
 
+        await Hit("after-plan");
+
+        // 2) Apply: compare-and-set per planned step, one transaction per batch of credits
+        var pending = new List<OnlineCredit>();
+        foreach (var credit in credits)
+        {
+            if (credit.Applied) continue;
+            if (credit.Plan!.Count == 0) credit.Applied = true;
+            else pending.Add(credit);
+        }
+
+        for (var i = 0; i < pending.Count; i += OnlineBatchSize)
+        {
+            var batch = pending.GetRange(i, Math.Min(OnlineBatchSize, pending.Count - i));
+            var steps = batch.SelectMany(c => c.Plan!).ToList();
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                // One compare-and-set statement per StepsPerStatement planned steps (normally one per batch)
+                for (var s = 0; s < steps.Count; s += StepsPerStatement)
+                    await connection.ExecuteAsync(new CommandDefinition(
+                        databaseProvider.GetApplyOnlineCreditQuery(steps.GetRange(s, Math.Min(StepsPerStatement, steps.Count - s))),
+                        transaction: transaction, cancellationToken: ct));
+                await Hit("before-commit");
+                await transaction.CommitAsync(ct);
+            }
+
+            // Between commit and this mark the acknowledgement can be lost: the retry replays the CAS steps, which
+            // are no-ops for everything that did commit.
+            await Hit("after-commit");
+            foreach (var credit in batch) credit.Applied = true;
+        }
+
+        // 3) Which of these players' mutes are now used up (read-only, repeatable)
         var select = databaseProvider.GetExpiredOnlineMutesBatchQuery(multiServer);
         var all = credits.Select(c => c.SteamId).Distinct().ToList();
         for (var i = 0; i < all.Count; i += OnlineBatchSize)
@@ -235,6 +291,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
                 new { ids = batch, serverid = serverId }, cancellationToken: ct)));
         }
 
+        await Hit("after-select");
         return expired;
     }
 

@@ -89,7 +89,7 @@ public partial class CS2_SimpleAdmin
             int? penaltyId = await BanManager.BanPlayer(playerInfo, adminInfo, reason, time);
             if (penaltyId == null)
             {
-                await ReportWriteFailureAsync(caller, $"Ban of {playerInfo.Name}");
+                await ReportWriteFailureAsync($"Ban of {playerInfo.Name}");
                 return;
             }
 
@@ -175,7 +175,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid.SteamId64, adminInfo, reason, time);
-                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Ban");
+                if (penaltyId == null) await ReportWriteFailureAsync("Ban");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Ban, reason, time,
@@ -237,7 +237,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid, adminInfo, reason, time);
-                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Ban");
+                if (penaltyId == null) await ReportWriteFailureAsync("Ban");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Ban, reason, time,
@@ -443,7 +443,7 @@ public partial class CS2_SimpleAdmin
         if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
         {
             int? penaltyId = await WarnManager.WarnPlayer(playerInfo, adminInfo, reason, time);
-            if (penaltyId == null) await ReportWriteFailureAsync(caller, "Warn");
+            if (penaltyId == null) await ReportWriteFailureAsync("Warn");
             await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Warn, reason, time,
@@ -451,7 +451,7 @@ public partial class CS2_SimpleAdmin
             });
 
             // Check for warn thresholds and execute punish command if applicable
-            var totalWarns = await WarnManager.GetPlayerWarnsCount(player.SteamID);
+            var totalWarns = await WarnManager.GetPlayerWarnsCount(playerInfo.SteamId.SteamId64); // managed snapshot
             if (Config.WarnThreshold.Count > 0)
             {
                 string? punishCommand = null;
@@ -536,7 +536,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await WarnManager.AddWarnBySteamid(steamid.SteamId64, adminInfo, reason, time);
-                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Warn");
+                if (penaltyId == null) await ReportWriteFailureAsync("Warn");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Warn, reason, time,

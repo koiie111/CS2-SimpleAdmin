@@ -354,7 +354,8 @@ public partial class CS2_SimpleAdmin
                 RenamedPlayers.Remove(steamId);
             }
 
-            TryQueuePenaltyWork(caller, null, "rename-save", _ => PlayerManager.SaveRenamedPlayer(steamId, newName));
+            // sa_renames is a global table (no server_id): an explicitly global write
+            TryQueuePenaltyWork(caller, null, "rename-save", _ => PlayerManager.SaveRenamedPlayer(steamId, newName), OperationScope.Global);
         });
     }
 

@@ -17,9 +17,10 @@ namespace CS2_SimpleAdmin.Managers;
 /// re-read a ban as ACTIVE that is already past its end (cached bans also carry ends/duration and are checked
 /// against the clock, which closes the remaining window).</item>
 /// <item>The game-thread part only snapshots sessions and applies results; all SQL runs on one DB worker.</item>
-/// <item>TimeMode 0: each session accrues real online time; whole minutes are credited to its mutes set-based and
-/// committed to the session only after the UPDATE succeeded (no double counting after reconnects or retries,
-/// no drift from the 61 s period).</item>
+/// <item>TimeMode 0: each session accrues real online time; whole minutes are credited to its mutes set-based as an
+/// <see cref="OnlineCredit"/>, an idempotent compare-and-set plan that is retried unchanged until it is applied and
+/// only then folded into the session's checkpoint (no double counting after partial failures, lost commits or
+/// retries; a new mute receives only the time after its own creation).</item>
 /// </list>
 /// </summary>
 internal static class PeriodicMaintenance
@@ -27,7 +28,7 @@ internal static class PeriodicMaintenance
     private static int _running;
     private static readonly long TicksPerMinute = Stopwatch.Frequency * 60;
 
-    internal readonly record struct SessionCredit(PlayerSession Session, int Minutes, long CreditTicks);
+    internal readonly record struct SessionCredit(PlayerSession Session, OnlineCredit Credit);
 
     public static bool IsRunning => Volatile.Read(ref _running) != 0;
 
@@ -90,22 +91,40 @@ internal static class PeriodicMaintenance
         var serverId = CS2_SimpleAdmin.ServerId;
         var sessions = new List<PlayerSession>();
         Runtime.Sessions.Snapshot(sessions);
-        var credits = config.OtherSettings.TimeMode == 0 ? ComputeCredits(sessions, Stopwatch.GetTimestamp()) : [];
+        var credits = config.OtherSettings.TimeMode == 0
+            ? ComputeCredits(sessions, Stopwatch.GetTimestamp(), Time.ActualDateTime())
+            : [];
 
         if (!Runtime.TryQueueDb("periodic", ct => RunAsync(plugin, config, serverId, sessions, credits, ct)))
             Volatile.Write(ref _running, 0);
     }
 
-    /// <summary>Whole online minutes not yet credited, per session (game thread; pure apart from reading sessions).</summary>
-    internal static List<SessionCredit> ComputeCredits(List<PlayerSession> sessions, long nowTimestamp)
+    /// <summary>
+    /// Game thread. The credit each session should send this pass: its outstanding (unfinished) credit if it has one,
+    /// otherwise a new one for the whole minutes accrued since its checkpoint. A session never has two credits at
+    /// once, so windows cannot overlap or repeat.
+    /// </summary>
+    internal static List<SessionCredit> ComputeCredits(List<PlayerSession> sessions, long nowTimestamp, DateTime now)
     {
         var credits = new List<SessionCredit>(sessions.Count);
         foreach (var session in sessions)
         {
-            var uncredited = nowTimestamp - session.StartedTimestamp - session.CreditedTicks;
-            var minutes = (int)(uncredited / TicksPerMinute);
-            if (minutes > 0)
-                credits.Add(new SessionCredit(session, minutes, minutes * TicksPerMinute));
+            if (session.PendingCredit is { } outstanding)
+            {
+                credits.Add(new SessionCredit(session, outstanding));
+                continue;
+            }
+
+            var startTicks = session.StartedTimestamp + session.CreditedTicks;
+            var minutes = (int)((nowTimestamp - startTicks) / OnlineCredit.TicksPerMinute);
+            if (minutes <= 0) continue;
+
+            var endTicks = startTicks + minutes * OnlineCredit.TicksPerMinute;
+            var windowStart = now - TimeSpan.FromSeconds((double)(nowTimestamp - startTicks) / Stopwatch.Frequency);
+            var windowEnd = now - TimeSpan.FromSeconds((double)(nowTimestamp - endTicks) / Stopwatch.Frequency);
+            var credit = new OnlineCredit(session.SteamId, minutes, minutes * OnlineCredit.TicksPerMinute, windowStart, windowEnd);
+            session.PendingCredit = credit;
+            credits.Add(new SessionCredit(session, credit));
         }
 
         return credits;
@@ -117,6 +136,12 @@ internal static class PeriodicMaintenance
         var start = LatencyHistogram.Now();
         try
         {
+            // TimeMode 0 first: its result (mutes used up) must be reported before the mute-expiry step below can mark
+            // them EXPIRED in SQL, and if it failed that step is skipped so no used-up mute escapes the report.
+            var onlineOk = true;
+            if (config.OtherSettings.TimeMode == 0 && credits.Count > 0)
+                onlineOk = await Step("online-mutes", () => ApplyOnlineTimeAsync(plugin, config, serverId, credits, ct)).ConfigureAwait(false);
+
             // Dependent pair, in order
             await Step("expire-bans", () => plugin.BanManager.ExpireOldBans()).ConfigureAwait(false);
             var cache = plugin.CacheManager;
@@ -124,7 +149,8 @@ internal static class PeriodicMaintenance
                 await Step("cache-refresh", () => cache.RefreshCacheAsync(config, serverId, ct)).ConfigureAwait(false);
 
             // Independent cleanups
-            await Step("expire-mutes", () => plugin.MuteManager.ExpireOldMutes()).ConfigureAwait(false);
+            if (onlineOk)
+                await Step("expire-mutes", () => plugin.MuteManager.ExpireOldMutes()).ConfigureAwait(false);
             await Step("expire-warns", () => plugin.WarnManager.ExpireOldWarns()).ConfigureAwait(false);
             await Step("expire-admins", () => plugin.PermissionManager.DeleteOldAdmins()).ConfigureAwait(false);
 
@@ -153,9 +179,6 @@ internal static class PeriodicMaintenance
                         }
                     }).ConfigureAwait(false);
             }
-
-            if (config.OtherSettings.TimeMode == 0 && credits.Count > 0)
-                await Step("online-mutes", () => ApplyOnlineTimeAsync(plugin, config, serverId, credits, ct)).ConfigureAwait(false);
         }
         finally
         {
@@ -167,17 +190,23 @@ internal static class PeriodicMaintenance
     private static async Task ApplyOnlineTimeAsync(CS2_SimpleAdmin plugin, CS2_SimpleAdminConfig config, int? serverId,
         List<SessionCredit> credits, CancellationToken ct)
     {
-        var rows = new List<(ulong SteamId, int Minutes)>(credits.Count);
-        foreach (var credit in credits) rows.Add((credit.Session.SteamId, credit.Minutes));
+        var batch = new List<OnlineCredit>(credits.Count);
+        foreach (var credit in credits) batch.Add(credit.Credit);
 
-        var expired = await plugin.MuteManager.CheckOnlineModeMutesAsync(rows, config.MultiServerMode, serverId, ct)
+        var expired = await plugin.MuteManager.CheckOnlineModeMutesAsync(batch, config.MultiServerMode, serverId, ct)
             .ConfigureAwait(false);
 
         await Runtime.OnGameThread(() =>
         {
-            // Commit only after the UPDATE succeeded; a failed pass credits the same time next pass
+            // Fold into the checkpoint only now that the database holds the credit AND the result was read. If this
+            // item never runs (unload), the outstanding credit simply stays on the session; the next pass replays it
+            // idempotently and folds it then.
             foreach (var credit in credits)
-                credit.Session.CreditedTicks += credit.CreditTicks;
+            {
+                if (!credit.Credit.Applied || !ReferenceEquals(credit.Session.PendingCredit, credit.Credit)) continue;
+                credit.Session.CreditedTicks += credit.Credit.Ticks;
+                credit.Session.PendingCredit = null;
+            }
 
             foreach (var row in expired)
             {
@@ -188,11 +217,13 @@ internal static class PeriodicMaintenance
         }).ConfigureAwait(false);
     }
 
-    private static async Task Step(string name, Func<Task> step)
+    /// <summary>Runs one maintenance step; returns false if it failed (cancellation still propagates).</summary>
+    private static async Task<bool> Step(string name, Func<Task> step)
     {
         try
         {
             await step().ConfigureAwait(false);
+            return true;
         }
         catch (OperationCanceledException)
         {
@@ -201,6 +232,7 @@ internal static class PeriodicMaintenance
         catch (Exception ex)
         {
             RateLimitedLog.Error($"periodic.{name}", ex, $"Maintenance step '{name}' failed");
+            return false;
         }
     }
 }

@@ -74,7 +74,10 @@ public interface IDatabaseProvider
     string GetPlayerPenaltyStatsQuery(bool multiServer);
 
     // TimeMode 0 (online time), set-based over the online players
-    string GetUpdateMutePassedBatchQuery(bool multiServer);
+    string GetWarnsMenuPageQuery(bool multiServer);
+    string GetWarnsMenuCountQuery(bool multiServer);
+    string GetOnlineCreditPlanQuery(bool multiServer);
+    string GetApplyOnlineCreditQuery(IReadOnlyList<Managers.OnlineCreditStep> steps);
     string GetExpiredOnlineMutesBatchQuery(bool multiServer);
 
     // Penalty history (css_history): filtered + paged in SQL

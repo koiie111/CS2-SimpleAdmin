@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CS2_SimpleAdmin.Managers;
 
 namespace CS2_SimpleAdmin.Infrastructure;
 
@@ -18,13 +19,105 @@ internal sealed class PlayerSession(long id, int slot, ulong steamId, int userId
     public string? IpAddress { get; } = ipAddress;
     public long StartedTimestamp { get; } = Stopwatch.GetTimestamp();
 
-    /// <summary>Set once the connect load was queued; used to deduplicate connect / connect_full.</summary>
-    public bool LoadQueued { get; set; }
+    // ---- connect load state machine (game thread only) ----
+    // Pending ──TryBeginLoad──▶ InFlight ──CompleteLoad──▶ Loaded
+    //    ▲                          │
+    //    └─ RetryWait ◀─FailLoad────┘   (queue full: ReleaseLoad(queueFull) → RetryWait without counting an attempt)
+    // Every transition carries the attempt number it was started with, so a late result of an older attempt
+    // (or of a session that was replaced) cannot move the state.
+
+    public ConnectLoadState LoadState { get; private set; } = ConnectLoadState.Pending;
+
+    /// <summary>Number of load attempts started for this connection.</summary>
+    public int LoadAttempts { get; private set; }
+
+    /// <summary>Stopwatch timestamp from which the next attempt may start (while <see cref="ConnectLoadState.RetryWait"/>).</summary>
+    public long NextLoadAttemptTimestamp { get; private set; }
+
+    /// <summary>True once a load was started or finished: used to deduplicate connect / connect_full.</summary>
+    public bool LoadStartedOrDone => LoadState is ConnectLoadState.InFlight or ConnectLoadState.Loaded;
+
+    /// <summary>Starts an attempt if the session is waiting for one that is due. Returns its number, or 0.</summary>
+    public int TryBeginLoad(long nowTimestamp)
+    {
+        if (LoadState == ConnectLoadState.Pending ||
+            LoadState == ConnectLoadState.RetryWait && nowTimestamp >= NextLoadAttemptTimestamp)
+        {
+            LoadState = ConnectLoadState.InFlight;
+            return ++LoadAttempts;
+        }
+
+        return 0;
+    }
+
+    /// <summary>The attempt's result was applied (or the session was kicked). Ignored for a stale attempt.</summary>
+    public bool CompleteLoad(int attempt)
+    {
+        if (LoadState != ConnectLoadState.InFlight || attempt != LoadAttempts) return false;
+        LoadState = ConnectLoadState.Loaded;
+        return true;
+    }
+
+    /// <summary>The attempt failed after the database accepted the work: schedule a retry with backoff.</summary>
+    public bool FailLoad(int attempt, long nowTimestamp, out TimeSpan delay)
+    {
+        delay = default;
+        if (LoadState != ConnectLoadState.InFlight || attempt != LoadAttempts) return false;
+        delay = LoadRetryPolicy.Delay(attempt, SteamId);
+        NextLoadAttemptTimestamp = nowTimestamp + (long)(delay.TotalSeconds * Stopwatch.Frequency);
+        LoadState = ConnectLoadState.RetryWait;
+        return true;
+    }
+
+    /// <summary>
+    /// The queue refused the attempt (full/stopped) so nothing was tried: wait a short time without consuming the
+    /// attempt counter (a full queue says nothing about this player's data).
+    /// </summary>
+    public bool ReleaseLoad(int attempt, long nowTimestamp, TimeSpan delay)
+    {
+        if (LoadState != ConnectLoadState.InFlight || attempt != LoadAttempts) return false;
+        LoadAttempts--;
+        NextLoadAttemptTimestamp = nowTimestamp + (long)(delay.TotalSeconds * Stopwatch.Frequency);
+        LoadState = ConnectLoadState.RetryWait;
+        return true;
+    }
+
+    /// <summary>Pending credit of online minutes (TimeMode 0); see <see cref="OnlineCredit"/>. Written by the DB worker, read by the game thread between passes.</summary>
+    public OnlineCredit? PendingCredit { get; set; }
 
     /// <summary>TimeMode 0 accounting: Stopwatch ticks of online time already converted to whole minutes.</summary>
     public long CreditedTicks { get; set; }
 
     public override string ToString() => $"session#{Id} slot={Slot} steam={SteamId} userid={UserId}";
+}
+
+internal enum ConnectLoadState
+{
+    /// <summary>No load started yet (connected before Ready, or not picked up).</summary>
+    Pending,
+
+    /// <summary>A load is queued or running on the database queue.</summary>
+    InFlight,
+
+    /// <summary>The load result was applied to the game state.</summary>
+    Loaded,
+
+    /// <summary>The last attempt failed (or could not be queued); the next one starts when due.</summary>
+    RetryWait
+}
+
+/// <summary>Backoff of failed connect loads: 2 s, 5 s, 15 s, 30 s, then every 60 s, with up to 25% deterministic jitter per player.</summary>
+internal static class LoadRetryPolicy
+{
+    private static readonly int[] Seconds = [2, 5, 15, 30, 60];
+    public static readonly TimeSpan QueueFullDelay = TimeSpan.FromSeconds(2);
+
+    public static TimeSpan Delay(int attempt, ulong steamId)
+    {
+        var baseSeconds = Seconds[Math.Min(Math.Max(attempt, 1), Seconds.Length) - 1];
+        var jitter = 1.0 + (steamId % 25) / 100.0; // spreads a whole server's retries after a DB outage
+        return TimeSpan.FromSeconds(baseSeconds * jitter);
+    }
 }
 
 /// <summary>

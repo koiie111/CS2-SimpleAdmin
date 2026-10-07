@@ -111,11 +111,13 @@ internal static class PluginMetrics
     public static long DispatcherRejected;
     public static long DispatcherDroppedStale;
     public static long DispatcherDeferredUpdates;
+    public static long DispatcherOverBudgetItems;
     public static long StaleSessionResults;
     public static long PeriodicSkippedOverlap;
     public static long ReloadAdminsCoalesced;
     public static long CacheReconciles;
     public static long ConnectDeduplicated;
+    public static long ConnectLoadRetries;
 
     private static readonly LatencyHistogram[] All =
     [
@@ -132,9 +134,9 @@ internal static class PluginMetrics
         sb.AppendLine(
             $"http: sent={Interlocked.Read(ref HttpSent)} failed={Interlocked.Read(ref HttpFailed)} rejected={Interlocked.Read(ref HttpRejected)} 429={Interlocked.Read(ref HttpRateLimited)}");
         sb.AppendLine(
-            $"dispatcher: rejected={Interlocked.Read(ref DispatcherRejected)} stale={Interlocked.Read(ref DispatcherDroppedStale)} deferredUpdates={Interlocked.Read(ref DispatcherDeferredUpdates)}");
+            $"dispatcher: rejected={Interlocked.Read(ref DispatcherRejected)} stale={Interlocked.Read(ref DispatcherDroppedStale)} deferredUpdates={Interlocked.Read(ref DispatcherDeferredUpdates)} overBudgetItems={Interlocked.Read(ref DispatcherOverBudgetItems)}");
         sb.AppendLine(
-            $"misc: staleSession={Interlocked.Read(ref StaleSessionResults)} periodicSkipped={Interlocked.Read(ref PeriodicSkippedOverlap)} reloadCoalesced={Interlocked.Read(ref ReloadAdminsCoalesced)} reconciles={Interlocked.Read(ref CacheReconciles)} connectDedup={Interlocked.Read(ref ConnectDeduplicated)}");
+            $"misc: staleSession={Interlocked.Read(ref StaleSessionResults)} periodicSkipped={Interlocked.Read(ref PeriodicSkippedOverlap)} reloadCoalesced={Interlocked.Read(ref ReloadAdminsCoalesced)} reconciles={Interlocked.Read(ref CacheReconciles)} connectDedup={Interlocked.Read(ref ConnectDeduplicated)} connectLoadRetries={Interlocked.Read(ref ConnectLoadRetries)}");
         sb.AppendLine(
             $"gc: gen0={GC.CollectionCount(0)} gen1={GC.CollectionCount(1)} gen2={GC.CollectionCount(2)} heap={GC.GetTotalMemory(false) / 1024}KB pause={GC.GetTotalPauseDuration().TotalMilliseconds:F1}ms");
         if (extra != null) sb.Append(extra());

@@ -20,13 +20,51 @@ internal static class SharedQueries
              (SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID{Server(multiServer)}) AS TotalWarns
          """;
 
-    /// <summary>TimeMode 0: add the credited online minutes to every active timed mute of the listed players.</summary>
-    public static string UpdateMutePassedBatch(bool multiServer) =>
-        $"UPDATE sa_mutes SET passed = COALESCE(passed, 0) + @minutes WHERE player_steamid IN @ids AND duration > 0 AND status = 'ACTIVE'{Server(multiServer)}";
+    /// <summary>
+    /// TimeMode 0, step 1 (read): the active timed mutes of the listed players with their current <c>passed</c>, the
+    /// pre-image of an <see cref="Managers.OnlineCredit"/> plan.
+    /// </summary>
+    public static string OnlineCreditPlan(bool multiServer) =>
+        $"SELECT id AS Id, player_steamid AS SteamId, COALESCE(passed, 0) AS Passed, created AS Created, duration AS Duration FROM sa_mutes WHERE player_steamid IN @ids AND duration > 0 AND status = 'ACTIVE'{Server(multiServer)}";
+
+    /// <summary>
+    /// TimeMode 0, step 2 (write): the compare-and-set of a set of planned steps in ONE statement. Per row it is
+    /// <c>UPDATE … SET passed = target WHERE id = … AND passed = expected</c>, which changes the row only while
+    /// <c>passed</c> still equals the pre-image of the plan, so re-running the statement any number of times (retry,
+    /// lost commit acknowledgement) can apply each step at most once. Only integers taken from the plan are
+    /// formatted into the text (no strings, no injection surface); the statement is bounded by the caller.
+    /// </summary>
+    public static string ApplyOnlineCredit(IReadOnlyList<Managers.OnlineCreditStep> steps)
+    {
+        if (steps.Count == 0) throw new ArgumentException("no steps", nameof(steps));
+        var set = new System.Text.StringBuilder("UPDATE sa_mutes SET passed = CASE id");
+        var where = new System.Text.StringBuilder();
+        foreach (var s in steps)
+        {
+            set.Append(" WHEN ").Append(s.MuteId).Append(" THEN ").Append(s.Target);
+            if (where.Length > 0) where.Append(" OR ");
+            where.Append("(id = ").Append(s.MuteId).Append(" AND COALESCE(passed, 0) = ").Append(s.Expected).Append(')');
+        }
+
+        return set.Append(" END WHERE status = 'ACTIVE' AND (").Append(where).Append(')').ToString();
+    }
 
     /// <summary>TimeMode 0: active timed mutes of the listed players whose online time is used up (minimal columns).</summary>
     public static string ExpiredOnlineMutesBatch(bool multiServer) =>
         $"SELECT player_steamid AS SteamId, ends AS Ends FROM sa_mutes WHERE player_steamid IN @ids AND passed >= duration AND duration > 0 AND status = 'ACTIVE'{Server(multiServer)}";
+
+    /// <summary>Longest reason text the warns menu ever reads from SQL (longer ones are cut there, not after loading).</summary>
+    public const int WarnMenuReasonChars = 80;
+
+    /// <summary>
+    /// One page of a player's warns for the menu: active first, then newest first. (active-flag, id) is unique, so the
+    /// order is stable and pages neither repeat nor skip rows. Reason is cut in SQL.
+    /// </summary>
+    public static string WarnsMenuPage(bool multiServer) =>
+        $"SELECT id AS Id, status AS Status, SUBSTR(reason, 1, {WarnMenuReasonChars}) AS Reason FROM sa_warns WHERE player_steamid = @PlayerSteamID{Server(multiServer)} ORDER BY CASE WHEN status = 'ACTIVE' THEN 0 ELSE 1 END, id DESC LIMIT @limit OFFSET @offset";
+
+    public static string WarnsMenuCount(bool multiServer) =>
+        $"SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID{Server(multiServer)}";
 
     /// <summary>
     /// History filter word (plural, as typed by the admin) → which tables/types to read.

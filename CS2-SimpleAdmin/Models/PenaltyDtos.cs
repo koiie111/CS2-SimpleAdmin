@@ -33,6 +33,24 @@ public sealed class ExpiredOnlineMuteRow
     public DateTime? Ends { get; init; }
 }
 
+/// <summary>One line of the warns menu (reason already cut in SQL).</summary>
+public sealed class WarnMenuRow
+{
+    public int Id { get; init; }
+    public string Status { get; init; } = "";
+    public string? Reason { get; init; }
+}
+
+/// <summary>An active timed mute with its current online-time counter (pre-image of an online credit plan).</summary>
+public sealed class OnlineCreditPlanRow
+{
+    public int Id { get; init; }
+    public long SteamId { get; init; }
+    public int Passed { get; init; }
+    public DateTime? Created { get; init; }
+    public int Duration { get; init; }
+}
+
 /// <summary>One css_history line, newest first.</summary>
 public sealed class PenaltyHistoryRow
 {

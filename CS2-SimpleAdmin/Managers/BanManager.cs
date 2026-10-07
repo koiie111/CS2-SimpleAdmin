@@ -382,12 +382,16 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
                 .Distinct()
                 .ToList();
 
-            if (steamIds.Count > 0)
+            // A short pattern can match hundreds of bans: one bounded game-thread item per chunk of console commands
+            for (var i = 0; i < steamIds.Count; i += 20)
+            {
+                var chunk = steamIds.GetRange(i, Math.Min(20, steamIds.Count - i));
                 await Infrastructure.Runtime.OnGameThread(() =>
                 {
-                    foreach (var steamId in steamIds)
+                    foreach (var steamId in chunk)
                         Server.ExecuteCommand($"removeid {new SteamID(steamId).SteamId3}");
                 });
+            }
         }
     }
     catch (Exception ex)

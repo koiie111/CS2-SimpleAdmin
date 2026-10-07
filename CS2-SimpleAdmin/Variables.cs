@@ -38,8 +38,13 @@ public partial class CS2_SimpleAdmin
     // Written on the game thread (MarkReady), read from background work
     internal static volatile bool ServerLoaded;
     private static int _serverIdRaw = -1;
-    /// <summary>sa_servers.id of this server, or null before it is resolved. Atomic for cross-thread reads.</summary>
-    internal static int? ServerId
+
+    /// <summary>
+    /// The plugin-wide sa_servers.id (null until the server row is resolved, and again after a restart). Written only
+    /// by server startup for its own lifetime. Code that must not observe changes over time uses
+    /// <see cref="ServerId"/> inside a queued job or captures a <see cref="Infrastructure.WorkContext"/>.
+    /// </summary>
+    internal static int? GlobalServerId
     {
         get
         {
@@ -48,6 +53,13 @@ public partial class CS2_SimpleAdmin
         }
         set => Volatile.Write(ref _serverIdRaw, value ?? -1);
     }
+
+    /// <summary>
+    /// sa_servers.id for the current operation. Inside a queued DB job this is the id captured when the job was
+    /// accepted (it cannot change while the job waits or retries); elsewhere (game thread, startup) the current
+    /// <see cref="GlobalServerId"/>. null before it is resolved.
+    /// </summary>
+    internal static int? ServerId => Infrastructure.WorkContext.Current is { } work ? work.ServerId : GlobalServerId;
     internal static readonly HashSet<ulong> AdminDisabledJoinComms = [];
 
     // Player Management

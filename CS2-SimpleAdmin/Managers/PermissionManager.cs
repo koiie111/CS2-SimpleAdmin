@@ -123,6 +123,15 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
     /// <returns>True when at least one group was written (the caller then loads the file into CSS).</returns>
     public async Task<bool> CreateGroupsJsonFile()
     {
+        var (json, count) = await ReadGroupsJsonAsync();
+        var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "groups.json");
+        await WriteAtomicallyAsync(filePath, json);
+        return count > 0;
+    }
+
+    /// <summary>Reads the groups from the database and serialises them; writes nothing.</summary>
+    private async Task<(string Json, int Count)> ReadGroupsJsonAsync()
+    {
         var groupsData = await GetAllGroupsData();
         var jsonData = new Dictionary<string, object>();
 
@@ -143,10 +152,37 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
 	        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        var json = JsonSerializer.Serialize(jsonData, options);
-        var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "groups.json");
-        await WriteAtomicallyAsync(filePath, json);
-        return groupsData.Count > 0;
+        return (JsonSerializer.Serialize(jsonData, options), groupsData.Count);
+    }
+
+    /// <summary>
+    /// Everything one admin reload needs, read from the database <b>before</b> any file is touched: if reading fails
+    /// nothing was replaced, so the files on disk and the permissions in CounterStrikeSharp stay as they were.
+    /// </summary>
+    internal sealed record PreparedAdminReload(string GroupsJson, bool GroupsWritten, string AdminsJson, bool AdminsWritten,
+        List<(SteamID steamId, DateTime? ends, List<string> flags)> Admins);
+
+    /// <summary>Reads groups and admins (throws on any database error); no file is written.</summary>
+    internal async Task<PreparedAdminReload> PrepareAdminReloadAsync()
+    {
+        var (groupsJson, groupCount) = await ReadGroupsJsonAsync();
+        var (adminsJson, admins) = await ReadAdminsJsonAsync();
+        // The old code loaded a non-empty file ("{}" included); keep that behaviour for both files
+        return new PreparedAdminReload(groupsJson, groupCount > 0, adminsJson, adminsJson.Length > 0, admins);
+    }
+
+    /// <summary>
+    /// Replaces groups.json and admins.json: both temp files are written first, then renamed over the targets, so an
+    /// I/O error while writing leaves both originals in place.
+    /// </summary>
+    internal async Task CommitAdminFilesAsync(PreparedAdminReload prepared, string dataDirectory)
+    {
+        var groupsPath = Path.Combine(dataDirectory, "groups.json");
+        var adminsPath = Path.Combine(dataDirectory, "admins.json");
+        await File.WriteAllTextAsync(groupsPath + ".tmp", prepared.GroupsJson);
+        await File.WriteAllTextAsync(adminsPath + ".tmp", prepared.AdminsJson);
+        File.Move(groupsPath + ".tmp", groupsPath, true);
+        File.Move(adminsPath + ".tmp", adminsPath, true);
     }
 
     /// <summary>
@@ -170,6 +206,17 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
     /// <returns>Admins for the in-memory cache, and whether the written file contains any admin.</returns>
     [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
     public async Task<(List<(SteamID steamId, DateTime? ends, List<string> flags)> Admins, bool Written)> CreateAdminsJsonFileWithStatus()
+    {
+        var (json, newCache) = await ReadAdminsJsonAsync();
+        var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "admins.json");
+        await WriteAtomicallyAsync(filePath, json);
+
+        // The old code loaded admins.json whenever the file was non-empty ("{}" included); keep that behaviour
+        return (newCache, json.Length > 0);
+    }
+
+    /// <summary>Reads the admins from the database and serialises them; writes nothing.</summary>
+    private async Task<(string Json, List<(SteamID steamId, DateTime? ends, List<string> flags)> Admins)> ReadAdminsJsonAsync()
     {
         List<(ulong identity, string name, List<string> flags, int immunity, DateTime? ends)> allPlayers = await GetAllPlayersFlags();
         var validPlayers = allPlayers
@@ -219,12 +266,7 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
 			PropertyNamingPolicy = JsonNamingPolicy.CamelCase
 		};
 
-        var json = JsonSerializer.Serialize(jsonData, options);
-        var filePath = Path.Combine(CS2_SimpleAdmin.Instance.ModuleDirectory, "data", "admins.json");
-        await WriteAtomicallyAsync(filePath, json);
-
-        // The old code loaded admins.json whenever the file was non-empty ("{}" included); keep that behaviour
-        return (newCache, json.Length > 0);
+        return (JsonSerializer.Serialize(jsonData, options), newCache);
     }
 
     /// <summary>

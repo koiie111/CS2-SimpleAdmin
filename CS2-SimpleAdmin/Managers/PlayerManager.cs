@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -59,7 +60,9 @@ internal class PlayerManager
         }
 
         var session = Runtime.Sessions.BeginOrGet(player.Slot, steamId, player.UserId.Value, playerName, ipAddress, out _);
-        if (session.LoadQueued)
+        // connect + player_connect_full of one connection share one load; a load that failed is retried by its own
+        // backoff timer, not by the next connect event
+        if (session.LoadState != ConnectLoadState.Pending)
         {
             Interlocked.Increment(ref PluginMetrics.ConnectDeduplicated);
             return;
@@ -70,34 +73,103 @@ internal class PlayerManager
         // Before Ready the cache is not loaded; MarkReady → LoadPendingSessions picks this session up.
         if (Runtime.State != PluginState.Ready) return;
 
-        QueueLoad(session);
+        QueueLoad(session, Stopwatch.GetTimestamp());
     }
 
-    /// <summary>Game thread: queues loads for sessions that connected while the plugin was starting.</summary>
+    /// <summary>
+    /// Schedules <paramref name="callback"/> on the game thread after <paramref name="delay"/>. A seam: tests replace it
+    /// with a manual clock; production uses a CounterStrikeSharp timer.
+    /// </summary>
+    internal static Action<TimeSpan, Action> RetryScheduler { get; set; } =
+        (delay, callback) => CS2_SimpleAdmin.Instance.AddTimer((float)delay.TotalSeconds, callback);
+
+    /// <summary>
+    /// Game thread: starts loads for sessions that are waiting for one: connected while the plugin was starting
+    /// (<see cref="ConnectLoadState.Pending"/>) or whose retry is due (<see cref="ConnectLoadState.RetryWait"/>).
+    /// Also the safety net behind the per-session retry timers.
+    /// </summary>
     public void LoadPendingSessions()
     {
         var sessions = new List<PlayerSession>();
         Runtime.Sessions.Snapshot(sessions);
+        var now = Stopwatch.GetTimestamp();
         foreach (var session in sessions)
-            if (!session.LoadQueued)
-                QueueLoad(session);
+            if (session.LoadState is ConnectLoadState.Pending or ConnectLoadState.RetryWait)
+                QueueLoad(session, now);
     }
 
-    private void QueueLoad(PlayerSession session)
+    /// <summary>
+    /// Game thread. Starts the next attempt if the session is current and one is due (<paramref name="now"/> is a
+    /// Stopwatch timestamp; the retry timer passes <see cref="long.MaxValue"/>: its delay has elapsed by definition).
+    /// A queue that refuses the work does not consume an attempt and is retried shortly.
+    /// </summary>
+    internal void QueueLoad(PlayerSession session, long now)
     {
         var plugin = CS2_SimpleAdmin.Instance;
         var cache = plugin.CacheManager;
-        if (cache == null) return;
+        if (cache == null || !Runtime.Sessions.IsCurrent(session)) return; // never revive a disconnected session
+        var attempt = session.TryBeginLoad(now);
+        if (attempt == 0) return;
+
         var config = plugin.Config; // one config snapshot for the whole operation
-        session.LoadQueued = true;
-        if (!Runtime.TryQueueDb("connect-load", ct => LoadAsync(session, config, cache, ct)))
+        if (Runtime.TryQueueDb<bool>("connect-load", ct => LoadAsync(session, attempt, config, cache, ct)) != null) return;
+
+        // Queue full or stopped: nothing was tried, so wait a moment and try again (never silently forgotten)
+        if (session.ReleaseLoad(attempt, Stopwatch.GetTimestamp(), LoadRetryPolicy.QueueFullDelay))
+            ScheduleRetry(session, LoadRetryPolicy.QueueFullDelay);
+    }
+
+    private void ScheduleRetry(PlayerSession session, TimeSpan delay)
+    {
+        var context = Runtime.Context;
+        RetryScheduler(delay, () =>
         {
-            // Queue full: retried by the next periodic pass (LoadPendingSessions), never silently forgotten
-            session.LoadQueued = false;
+            // The timer belongs to the lifetime that scheduled it; after a restart the new lifetime's own
+            // LoadPendingSessions covers every session
+            if (context.IsCurrent) QueueLoad(session, long.MaxValue);
+        });
+    }
+
+    /// <summary>Game thread. A load attempt failed: back off and retry, unless the connection is gone or already moved on.</summary>
+    private void OnLoadFailed(PlayerSession session, int attempt, string reason)
+    {
+        if (!Runtime.Sessions.IsCurrent(session))
+        {
+            Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
+            return;
+        }
+
+        if (!session.FailLoad(attempt, Stopwatch.GetTimestamp(), out var delay)) return;
+        Interlocked.Increment(ref PluginMetrics.ConnectLoadRetries);
+        RateLimitedLog.Warning("connect.load-failed",
+            $"Connect load of {session} failed (attempt {attempt}), retrying in {delay.TotalSeconds:F0}s: {reason}");
+        ScheduleRetry(session, delay);
+    }
+
+    private async Task<bool> LoadAsync(PlayerSession session, int attempt, CS2_SimpleAdminConfig config, CacheManager cache,
+        CancellationToken ct)
+    {
+        try
+        {
+            await LoadCoreAsync(session, attempt, config, cache, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // unload / restart: nothing to retry in a dead lifetime
+        }
+        catch (Exception ex)
+        {
+            // The database accepted the work but it failed: return to the game thread, where the session state lives.
+            // The transition is bound to this attempt and session, so a late failure cannot touch a newer attempt,
+            // a replaced slot or a new lifetime (OnGameThread is bound to the lifetime the job was accepted in).
+            await Runtime.OnGameThread(() => OnLoadFailed(session, attempt, ex.Message)).ConfigureAwait(false);
+            return false;
         }
     }
 
-    private static async Task LoadAsync(PlayerSession session, CS2_SimpleAdminConfig config, CacheManager cache, CancellationToken ct)
+    private async Task LoadCoreAsync(PlayerSession session, int attempt, CS2_SimpleAdminConfig config, CacheManager cache,
+        CancellationToken ct)
     {
         var start = LatencyHistogram.Now();
         var plugin = CS2_SimpleAdmin.Instance;
@@ -117,14 +189,14 @@ internal class PlayerManager
             QueuePlayerDataUpdate(config, serverId, session, check, cache);
             await Runtime.OnGameThread(() =>
             {
-                var player = ResolveController(session);
-                if (player == null)
+                if (!ControllerAvailable(session))
                 {
                     Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
                     return;
                 }
 
-                Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED);
+                session.CompleteLoad(attempt); // a banned connection is finished: it is being kicked
+                KickBanned(session);
             }).ConfigureAwait(false);
             PluginMetrics.ConnectLoad.RecordSince(start);
             return;
@@ -132,7 +204,7 @@ internal class PlayerManager
 
         var accounts = new List<(ulong SteamId, string PlayerName)>();
         if (other.CheckMultiAccountsByIp && session.IpAddress != null)
-            foreach (var account in cache.GetAccountsByIp(session.IpAddress))
+            foreach (var account in cache.GetAccountsByIp(session.IpAddress, now, other.ExpireOldIpBans))
                 accounts.Add((account.SteamId, account.PlayerName));
 
         var stats = await plugin.MuteManager.GetPlayerPenaltyStatsAsync(session.SteamId, config.MultiServerMode, serverId, ct)
@@ -141,15 +213,29 @@ internal class PlayerManager
             serverId, now, ct).ConfigureAwait(false);
 
         var result = new LoadResult(false, stats, mutes, accounts);
-        await Runtime.OnGameThread(() => ApplyLoadResult(session, result, config)).ConfigureAwait(false);
+        await Runtime.OnGameThread(() => ApplyLoadResult(session, attempt, result, config)).ConfigureAwait(false);
         PluginMetrics.ConnectLoad.RecordSince(start);
     }
 
     /// <summary>Game thread. Applies a connect load if the connection is still current.</summary>
-    internal static void ApplyLoadResult(PlayerSession session, LoadResult result, CS2_SimpleAdminConfig config)
+    internal static void ApplyLoadResult(PlayerSession session, int attempt, LoadResult result, CS2_SimpleAdminConfig config)
     {
-        var player = ResolveController(session);
-        if (player == null)
+        if (!ControllerAvailable(session))
+        {
+            if (Runtime.Sessions.IsCurrent(session))
+            {
+                // Same connection, but its controller is not resolvable yet: try again instead of losing its penalties
+                CS2_SimpleAdmin.PlayerManager.OnLoadFailed(session, attempt, "controller not available when the result arrived");
+                return;
+            }
+
+            Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
+            return;
+        }
+
+        // Marked loaded before the first side effect: a failure while applying is a bug, not a database problem, and
+        // a retry would apply the same penalties twice
+        if (!session.CompleteLoad(attempt))
         {
             Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
             return;
@@ -184,12 +270,30 @@ internal class PlayerManager
             }
         }
 
-        if (voiceMuted)
-            player.VoiceFlags = VoiceFlags.Muted;
-
-        if (config.OtherSettings.NotifyPenaltiesToAdminOnConnect)
-            NotifyAdmins(player, info);
+        NativeEffects(session, info, voiceMuted, config.OtherSettings.NotifyPenaltiesToAdminOnConnect);
     }
+
+    // ---- the only places where a load result touches the engine; seams so the state logic is testable without a server ----
+
+    /// <summary>Game thread: is the controller of this session resolvable right now?</summary>
+    internal static Func<PlayerSession, bool> ControllerAvailable { get; set; } = static session => ResolveController(session) != null;
+
+    /// <summary>Game thread: voice flags and the admin notice for a freshly loaded player.</summary>
+    internal static Action<PlayerSession, PlayerInfo, bool, bool> NativeEffects { get; set; } =
+        static (session, info, voiceMuted, notifyAdmins) =>
+        {
+            var player = ResolveController(session);
+            if (player == null) return;
+            if (voiceMuted) player.VoiceFlags = VoiceFlags.Muted;
+            if (notifyAdmins) NotifyAdmins(player, info);
+        };
+
+    /// <summary>Game thread: kick a connection that the ban cache rejected.</summary>
+    internal static Action<PlayerSession> KickBanned { get; set; } = static session =>
+    {
+        if (ResolveController(session) is { } player)
+            Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED);
+    };
 
     private static void NotifyAdmins(CCSPlayerController player, PlayerInfo info)
     {

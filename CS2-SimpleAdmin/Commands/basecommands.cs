@@ -243,12 +243,32 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/generic")]
     public void OnAdminHelpCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        var lines = File.ReadAllLines(ModuleDirectory + "/admin_help.txt");
-
-        foreach (var line in lines)
+        // The file is read in the background (RefreshAdminHelpInBackground); this callback only prints the managed
+        // copy: at most AdminHelpCache.MaxLines lines, no disk access.
+        RefreshAdminHelpInBackground();
+        if (!AdminHelp.IsLoaded)
         {
-            command.ReplyToCommand(string.IsNullOrWhiteSpace(line) ? " " : line.ReplaceColorTags());
+            command.ReplyToCommand("[CS2-SimpleAdmin] Admin help is loading, try again in a moment.");
+            return;
         }
+
+        foreach (var line in AdminHelp.Lines)
+            command.ReplyToCommand(line);
+        if (AdminHelp.OmittedLines > 0)
+            command.ReplyToCommand($"... {AdminHelp.OmittedLines} more line(s) in admin_help.txt");
+    }
+
+    internal static readonly AdminHelpCache AdminHelp = new();
+
+    /// <summary>Queues a background (re)read of admin_help.txt; the game thread never waits for it.</summary>
+    internal void RefreshAdminHelpInBackground()
+    {
+        var path = ModuleDirectory + "/admin_help.txt";
+        Runtime.Http?.TryEnqueue("admin-help", _ =>
+        {
+            AdminHelp.Refresh(path, static line => line.ReplaceColorTags());
+            return Task.CompletedTask;
+        });
     }
 
     /// <summary>
@@ -307,7 +327,8 @@ public partial class CS2_SimpleAdmin
         if (DatabaseProvider == null) return;
         
         var flagsList = flags.Split(',').Select(flag => flag.Trim()).ToList();
-        if (!TryQueuePenaltyWork(caller, command, "admin-add", _ => Instance.PermissionManager.AddAdminBySteamId(steamid, name, flagsList, immunity, time, globalAdmin))) return;
+        if (!TryQueuePenaltyWork(caller, command, "admin-add", _ => Instance.PermissionManager.AddAdminBySteamId(steamid, name, flagsList, immunity, time, globalAdmin),
+                globalAdmin ? OperationScope.Global : OperationScope.Server)) return; // a global admin row has no server_id by design
 
         Helper.LogCommand(caller, $"css_addadmin {steamid} {name} {flags} {immunity} {time}");
 
@@ -352,7 +373,8 @@ public partial class CS2_SimpleAdmin
     public void RemoveAdmin(CCSPlayerController? caller, string steamid, bool globalDelete = false, CommandInfo? command = null)
     {
         if (DatabaseProvider == null) return;
-        if (!TryQueuePenaltyWork(caller, command, "admin-delete", _ => PermissionManager.DeleteAdminBySteamId(steamid, globalDelete))) return;
+        if (!TryQueuePenaltyWork(caller, command, "admin-delete", _ => PermissionManager.DeleteAdminBySteamId(steamid, globalDelete),
+                globalDelete ? OperationScope.Global : OperationScope.Server)) return;
 
         AddTimer(2, () =>
         {
@@ -423,7 +445,8 @@ public partial class CS2_SimpleAdmin
         if (DatabaseProvider == null) return;
 
         var flagsList = flags.Split(',').Select(flag => flag.Trim()).ToList();
-        if (!TryQueuePenaltyWork(caller, command, "group-add", _ => Instance.PermissionManager.AddGroup(name, flagsList, immunity, globalGroup))) return;
+        if (!TryQueuePenaltyWork(caller, command, "group-add", _ => Instance.PermissionManager.AddGroup(name, flagsList, immunity, globalGroup),
+                globalGroup ? OperationScope.Global : OperationScope.Server)) return;
 
         Helper.LogCommand(caller, $"css_addgroup {name} {flags} {immunity}");
 
@@ -472,7 +495,7 @@ public partial class CS2_SimpleAdmin
             {
                 await PermissionManager.DeleteGroup(name);
                 _ = ReloadAdminsAsync();
-            })) return;
+            }, OperationScope.Global)) return; // groups are not owned by one server row
 
         Helper.LogCommand(caller, $"css_delgroup {name}");
 
@@ -494,10 +517,28 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/root")]
     public void OnRelAdminCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        if (!EnsureDatabaseReady(command)) return;
-        ReloadAdmins(caller);
+        // Admins/groups are not tied to this server row being resolved: connected + migrated is enough
+        if (!EnsureDatabaseReady(command, OperationScope.Global)) return;
         // Reloads are coalesced: a reload already running is followed by exactly one more
         command.ReplyToCommand("Reloading sql admins and groups...");
+        _ = ReportAdminReloadAsync(CallerRef.Capture(caller));
+    }
+
+    /// <summary>Starts a (coalesced) reload and tells the issuer how it really ended.</summary>
+    private async Task ReportAdminReloadAsync(CallerRef issuer)
+    {
+        var context = Runtime.Context;
+        try
+        {
+            var result = await ReloadAdminsAsync().ConfigureAwait(false);
+            if (result == AdminReloadResult.Canceled) return; // plugin is unloading: nobody to tell
+            await context.PostAsync(() => issuer.Notify(result == AdminReloadResult.Success
+                ? "[CS2-SimpleAdmin] Admins and groups reloaded."
+                : "[CS2-SimpleAdmin] Admin reload FAILED - the previous permissions stay in force (see server log).")).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
     
     /// <summary>
@@ -846,35 +887,66 @@ public partial class CS2_SimpleAdmin
             var menuTitle = _localizer["sa_admin_warns_menu_title", player.PlayerName];
             var callerSteamId = caller.SteamID;
 
-            // DB read on a worker; the menu is created, filled and opened on the game thread
-            if (!Runtime.TryQueueDb("warns-menu", async _ =>
-            {
-                var warnsList = await WarnManager.GetPlayerWarns(targetInfo, false);
-                var sortedWarns = warnsList
-                    .OrderBy(warn => (string)warn.status == "ACTIVE" ? 0 : 1)
-                    .ThenByDescending(warn => (int)warn.id)
-                    .Select(warn => (Id: (int)warn.id, Active: (string)warn.status == "ACTIVE", Reason: (string)warn.reason))
-                    .ToList();
-
-                await Runtime.OnGameThread(() =>
-                {
-                    if (!caller.IsValid || caller.SteamID != callerSteamId) return;
-                    IMenu? warnsMenu = Helper.CreateMenu(menuTitle);
-                    foreach (var w in sortedWarns)
-                    {
-                        warnsMenu?.AddMenuOption($"[{(w.Active ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {w.Reason}",
-                            (controller, option) =>
-                            {
-                                if (!TryQueuePenaltyWork(controller, null, "unwarn", _ => WarnManager.UnwarnPlayer(targetInfo, w.Id))) return;
-                                if (player.IsValid)
-                                    player.PrintToChat(_localizer["sa_admin_warns_unwarn", player.PlayerName, w.Reason]);
-                            });
-                    }
-
-                    warnsMenu?.Open(caller);
-                });
-            }))
+            if (!EnsureDatabaseReady(command)) return;
+            if (!QueueWarnsMenu(caller, callerSteamId, player, targetInfo, menuTitle, 1))
                 command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+        });
+    }
+
+    /// <summary>
+    /// Reads one fixed-size page of the target's warns on a DB worker and builds/opens the menu on the game thread.
+    /// The game thread creates at most <see cref="WarnManager.MenuPageSize"/> + 2 options per page no matter how long
+    /// the history is; older warns are reachable with the Next/Previous options (each one a new bounded page read).
+    /// </summary>
+    private bool QueueWarnsMenu(CCSPlayerController caller, ulong callerSteamId, CCSPlayerController player,
+        CS2_SimpleAdminApi.PlayerInfo targetInfo, string menuTitle, int page)
+    {
+        var steamId = targetInfo.SteamId.SteamId64;
+        var multiServer = Config.MultiServerMode;
+        var serverId = ServerId;
+        return Runtime.TryQueueDb("warns-menu", async ct =>
+        {
+            (int Total, List<Models.WarnMenuRow> Rows) result;
+            try
+            {
+                result = await WarnManager.GetPlayerWarnsPageAsync(steamId, multiServer, serverId, page, WarnManager.MenuPageSize, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RateLimitedLog.Error("warns.menu", ex, "Unable to load warns for the menu");
+                return;
+            }
+
+            await Runtime.OnGameThread(() =>
+            {
+                if (!caller.IsValid || caller.SteamID != callerSteamId) return;
+                var pages = Math.Max(1, (result.Total + WarnManager.MenuPageSize - 1) / WarnManager.MenuPageSize);
+                var title = pages > 1 ? $"{menuTitle} ({page}/{pages})" : menuTitle;
+                IMenu? warnsMenu = Helper.CreateMenu(title);
+                foreach (var w in result.Rows)
+                {
+                    var active = w.Status == "ACTIVE";
+                    var reason = w.Reason ?? string.Empty;
+                    if (reason.Length >= Database.SharedQueries.WarnMenuReasonChars) reason += "…";
+                    var warnId = w.Id;
+                    warnsMenu?.AddMenuOption($"[{(active ? $"{ChatColors.LightRed}X" : $"{ChatColors.Lime}✔️")}{ChatColors.Default}] {reason}",
+                        (controller, option) =>
+                        {
+                            if (!TryQueuePenaltyWork(controller, null, "unwarn", _ => WarnManager.UnwarnPlayer(targetInfo, warnId))) return;
+                            if (player.IsValid)
+                                player.PrintToChat(_localizer!["sa_admin_warns_unwarn", player.PlayerName, reason]);
+                        });
+                }
+
+                if (page > 1)
+                    warnsMenu?.AddMenuOption("« Previous page",
+                        (controller, option) => QueueWarnsMenu(caller, callerSteamId, player, targetInfo, menuTitle, page - 1));
+                if (page < pages)
+                    warnsMenu?.AddMenuOption("Next page »",
+                        (controller, option) => QueueWarnsMenu(caller, callerSteamId, player, targetInfo, menuTitle, page + 1));
+
+                warnsMenu?.Open(caller);
+            });
         });
     }
 

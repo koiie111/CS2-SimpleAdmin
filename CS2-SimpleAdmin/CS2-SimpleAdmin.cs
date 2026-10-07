@@ -261,6 +261,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
 
         if (Config.EnableUpdateCheck)
             Runtime.Http?.TryEnqueue("update-check", _ => PluginInfo.CheckVersion(ModuleVersion, Logger));
+
+        RefreshAdminHelpInBackground(); // css_adminhelp prints this managed copy; no file I/O on the game thread
         
         PermissionManager = new PermissionManager(DatabaseProvider);
         BanManager = new BanManager(DatabaseProvider);

@@ -405,7 +405,10 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
             : "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime AND server_id = @serverid";
 
     public string GetPlayerPenaltyStatsQuery(bool multiServer) => SharedQueries.PlayerPenaltyStats(multiServer);
-    public string GetUpdateMutePassedBatchQuery(bool multiServer) => SharedQueries.UpdateMutePassedBatch(multiServer);
+    public string GetWarnsMenuPageQuery(bool multiServer) => SharedQueries.WarnsMenuPage(multiServer);
+    public string GetWarnsMenuCountQuery(bool multiServer) => SharedQueries.WarnsMenuCount(multiServer);
+    public string GetOnlineCreditPlanQuery(bool multiServer) => SharedQueries.OnlineCreditPlan(multiServer);
+    public string GetApplyOnlineCreditQuery(IReadOnlyList<Managers.OnlineCreditStep> steps) => SharedQueries.ApplyOnlineCredit(steps);
     public string GetExpiredOnlineMutesBatchQuery(bool multiServer) => SharedQueries.ExpiredOnlineMutesBatch(multiServer);
     public string GetPenaltyHistoryPageQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryPage(multiServer, type);
     public string GetPenaltyHistoryCountQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryCount(multiServer, type);

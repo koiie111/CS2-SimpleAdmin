@@ -9,6 +9,22 @@ using Microsoft.Extensions.Logging;
 namespace CS2_SimpleAdmin;
 
 /// <summary>
+/// What a database operation needs to be accepted. Connectivity (<see cref="Global"/>) is weaker than readiness for
+/// the server (<see cref="Server"/>): see <see cref="Runtime.IsDatabaseConnected"/> / <see cref="Runtime.IsOperationReady"/>.
+/// </summary>
+internal enum OperationScope
+{
+    /// <summary>The operation reads or writes rows scoped by server_id: needs <c>Ready</c> and a resolved server id.</summary>
+    Server,
+
+    /// <summary>
+    /// Deliberately not tied to this server's row (the rename table, an explicitly global admin/group, a reload of
+    /// admins): needs only a connected, migrated database. Using this is a statement that NULL/absent server_id is intended.
+    /// </summary>
+    Global
+}
+
+/// <summary>
 /// Startup sequence without waiting on the game thread:
 /// <c>connect (bounded retries) → migrations → [game thread: server convars] → server row → bans cache → admins → Ready</c>.
 /// Ready is raised at most once per plugin lifetime, only after the cache and admins are loaded.
@@ -28,16 +44,20 @@ public partial class CS2_SimpleAdmin
     {
         if (DatabaseProvider == null) return;
         var provider = DatabaseProvider;
-        var token = Runtime.Token;
-        Runtime.State = PluginState.Starting;
-        Runtime.LastError = null;
+        var context = Runtime.Context; // the lifetime this startup belongs to
+        Runtime.TrySetState(context, PluginState.Starting);
         // Task.Run: SQLite's "async" open is synchronous and must not run on this (game) thread.
-        _databaseInit = Task.Run(() => InitializeDatabaseAsync(provider, token), token);
+        _databaseInit = Task.Run(() => InitializeDatabaseAsync(provider, context.Token, context: context), context.Token);
     }
 
+    /// <param name="context">
+    /// The lifetime that started the initialization (default: the current one). State changes are applied only while
+    /// it is still current, so a slow startup of a previous lifetime cannot overwrite the state of the new one.
+    /// </param>
     internal static async Task<bool> InitializeDatabaseAsync(IDatabaseProvider provider, CancellationToken token,
-        IReadOnlyList<TimeSpan>? retryDelays = null)
+        IReadOnlyList<TimeSpan>? retryDelays = null, RuntimeContext? context = null)
     {
+        context ??= Runtime.Context;
         retryDelays ??= ConnectRetryDelays;
         string? error = null;
         for (var attempt = 0; ; attempt++)
@@ -47,9 +67,8 @@ public partial class CS2_SimpleAdmin
             error = exception;
             if (attempt >= retryDelays.Count)
             {
-                Runtime.State = PluginState.Failed;
-                Runtime.LastError = $"database connection failed: {error}";
-                _logger?.LogError("Problem with database connection! \n{exception}", error);
+                if (Runtime.TrySetState(context, PluginState.Failed, $"database connection failed: {error}"))
+                    _logger?.LogError("Problem with database connection! \n{exception}", error);
                 return false;
             }
 
@@ -63,14 +82,14 @@ public partial class CS2_SimpleAdmin
         }
         catch (Exception ex)
         {
-            Runtime.State = PluginState.Failed;
-            Runtime.LastError = ex.Message;
-            _logger?.LogError("Database migrations failed, plugin is not ready: {error}", ex.Message);
+            if (Runtime.TrySetState(context, PluginState.Failed, ex.Message))
+                _logger?.LogError("Database migrations failed, plugin is not ready: {error}", ex.Message);
             return false;
         }
 
-        if (Runtime.State == PluginState.Starting)
-            Runtime.State = PluginState.DatabaseReady;
+        // Only moves Starting → DatabaseReady, and only in the lifetime that started this: never over Ready/Failed
+        // or into a newer lifetime. DatabaseReady alone does not allow server-scoped writes (see EnsureDatabaseReady).
+        Runtime.TryMarkDatabaseReady(context);
         return true;
     }
 
@@ -103,15 +122,24 @@ public partial class CS2_SimpleAdmin
 
     /// <summary>
     /// For commands that need the database: true when usable, otherwise replies with the current state.
+    /// <para>
+    /// "Connected" and "ready for operations" are different: <see cref="PluginState.DatabaseReady"/> (connected and
+    /// migrated, server row not resolved yet) is enough only for <see cref="OperationScope.Global"/> work. A
+    /// <see cref="OperationScope.Server"/> operation (every ban/mute/warn write, history, stats…) needs
+    /// <see cref="PluginState.Ready"/> and a server id, otherwise it would be saved with a NULL server_id and vanish
+    /// from single-server queries once the server id is known.
+    /// </para>
     /// </summary>
-    internal static bool EnsureDatabaseReady(CommandInfo? command)
+    internal static bool EnsureDatabaseReady(CommandInfo? command, OperationScope scope = OperationScope.Server)
     {
-        if (DatabaseProvider != null && Runtime.State is PluginState.Ready or PluginState.DatabaseReady && Runtime.Db != null)
+        if (scope == OperationScope.Global ? Runtime.IsDatabaseConnected : Runtime.IsOperationReady)
             return true;
 
         var message = Runtime.State switch
         {
             PluginState.Failed => $"[CS2-SimpleAdmin] Database unavailable: {Runtime.LastError ?? "unknown error"}",
+            PluginState.DatabaseReady when scope == OperationScope.Server =>
+                "[CS2-SimpleAdmin] Plugin is still starting (this server is not registered in the database yet), try again in a moment.",
             _ => "[CS2-SimpleAdmin] Plugin is still starting (database not ready yet), try again in a moment."
         };
         if (command != null)
@@ -122,46 +150,56 @@ public partial class CS2_SimpleAdmin
     }
 
     /// <summary>
-    /// Queues a mandatory database write (ban, mute, warn, unban…). If the bounded queue is full, nothing is
-    /// applied and the caller is told explicitly; the penalty is never silently dropped.
+    /// Queues a mandatory database write (ban, mute, warn, unban…). If the bounded queue is full or the plugin is not
+    /// ready for the operation, nothing is applied and the caller is told explicitly; the penalty is never silently
+    /// dropped. The server id and the caller's identity are captured <b>now</b>, on the game thread, and travel with
+    /// the job: the job never reads the mutable global server id or a controller later.
     /// </summary>
     internal static bool TryQueuePenaltyWork(CCSPlayerController? caller, CommandInfo? command, string operation,
-        Func<CancellationToken, Task> work)
+        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server) =>
+        TryQueuePenaltyWork(CallerRef.Capture(caller), command, operation, work, scope);
+
+    internal static bool TryQueuePenaltyWork(CallerRef caller, CommandInfo? command, string operation,
+        Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server)
     {
-        if (!EnsureDatabaseReady(command))
+        if (!EnsureDatabaseReady(command, scope))
         {
-            if (command == null && caller is { IsValid: true })
-                caller.PrintToChat("[CS2-SimpleAdmin] Database not ready - the action was NOT saved. Try again in a moment.");
+            if (command == null)
+                caller.Notify("[CS2-SimpleAdmin] Database not ready - the action was NOT saved. Try again in a moment.");
             return false;
         }
 
-        if (Runtime.TryQueueDb(operation, work)) return true;
+        // One read of the server id: the same value is what the readiness check required and what the job will use
+        var serverId = GlobalServerId;
+        if (scope == OperationScope.Server && serverId == null)
+        {
+            if (command != null) command.ReplyToCommand("[CS2-SimpleAdmin] Plugin is still starting (server id not resolved), try again in a moment.");
+            else caller.Notify("[CS2-SimpleAdmin] Server not registered yet - the action was NOT saved. Try again in a moment.");
+            return false;
+        }
+
+        if (Runtime.TryQueueDb(operation, work, new WorkContext(Runtime.Context, serverId, caller))) return true;
 
         const string message = "[CS2-SimpleAdmin] Database queue is full or unavailable - the action was NOT saved. Try again.";
         if (command != null)
             command.ReplyToCommand(message);
-        else if (caller is { IsValid: true })
-            caller.PrintToChat(message);
         else
-            CounterStrikeSharp.API.Server.PrintToConsole(message);
+            caller.Notify(message);
         _logger?.LogError("{Operation} was rejected: database queue full or unavailable", operation);
         return false;
     }
 
-    /// <summary>Tells the issuing admin (or the console) that a queued write failed in the database.</summary>
-    internal static Task ReportWriteFailureAsync(CCSPlayerController? caller, string what)
+    /// <summary>
+    /// Tells the issuing admin (or the console) that the queued write failed in the database. Must be called from
+    /// inside the queued job: the caller identity is the snapshot taken on the game thread when the command was
+    /// accepted (<see cref="WorkContext.Caller"/>); this method touches no controller and no native state on the
+    /// worker. The message is delivered by a game-thread callback that re-checks that the same connection is still there.
+    /// </summary>
+    internal static Task ReportWriteFailureAsync(string what)
     {
-        var callerSlot = caller?.Slot;
-        var callerSteamId = caller?.SteamID;
+        var caller = WorkContext.Current?.Caller ?? CallerRef.Console;
         return Runtime.OnGameThread(() =>
-        {
-            var message = $"[CS2-SimpleAdmin] {what} could NOT be saved to the database (see server log).";
-            var target = callerSlot.HasValue ? CounterStrikeSharp.API.Utilities.GetPlayerFromSlot(callerSlot.Value) : null;
-            if (target is { IsValid: true } && target.SteamID == callerSteamId)
-                target.PrintToChat(message);
-            else
-                CounterStrikeSharp.API.Server.PrintToConsole(message);
-        });
+            caller.Notify($"[CS2-SimpleAdmin] {what} could NOT be saved to the database (see server log)."));
     }
 
     /// <summary>
@@ -178,91 +216,58 @@ public partial class CS2_SimpleAdmin
 
     // ---------------------------------------------------------------- admins reload (coalesced)
 
-    private static readonly object AdminReloadGate = new();
-    private static bool _adminReloadBusy;
-    private static TaskCompletionSource? _adminReloadPending;
+    private static readonly AdminReloadCoordinator AdminReloads = new(
+        context => Instance.ReloadAdminsOnceAsync(context),
+        ex => _logger?.LogError("Unable to reload admins (current permissions are kept): {exception}", ex.Message));
 
     /// <summary>
-    /// Reloads SQL admins/groups. Concurrent requests coalesce: while one reload runs, every new request shares
-    /// a single follow-up reload, so N requests cause at most 2 reloads and never queue N file writes/timers.
+    /// Reloads SQL admins/groups. Concurrent requests coalesce (see <see cref="AdminReloadCoordinator"/>). The result
+    /// says what happened: only <see cref="AdminReloadResult.Success"/> means the permissions were replaced; on
+    /// <see cref="AdminReloadResult.Failed"/> the previous permissions stay in force.
     /// </summary>
-    internal Task ReloadAdminsAsync()
-    {
-        lock (AdminReloadGate)
-        {
-            if (_adminReloadBusy)
-            {
-                Interlocked.Increment(ref PluginMetrics.ReloadAdminsCoalesced);
-                _adminReloadPending ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                return _adminReloadPending.Task;
-            }
+    internal Task<AdminReloadResult> ReloadAdminsAsync() =>
+        AdminReloads.RequestAsync(WorkContext.Current?.Runtime ?? Runtime.Context);
 
-            _adminReloadBusy = true;
-        }
-
-        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _ = Task.Run(() => AdminReloadLoopAsync(first));
-        return first.Task;
-    }
-
-    private async Task AdminReloadLoopAsync(TaskCompletionSource? current)
-    {
-        while (current != null)
-        {
-            try
-            {
-                await ReloadAdminsOnceAsync(Runtime.Token).ConfigureAwait(false);
-                current.TrySetResult();
-            }
-            catch (Exception ex)
-            {
-                // A failed DB read aborts here, leaving current permissions untouched
-                if (ex is not OperationCanceledException)
-                    _logger?.LogError("Unable to reload admins: {exception}", ex.Message);
-                current.TrySetResult();
-            }
-
-            lock (AdminReloadGate)
-            {
-                current = _adminReloadPending;
-                _adminReloadPending = null;
-                if (current == null) _adminReloadBusy = false;
-            }
-        }
-    }
-
-    private async Task ReloadAdminsOnceAsync(CancellationToken token)
+    private async Task ReloadAdminsOnceAsync(RuntimeContext context)
     {
         var permissionManager = PermissionManager;
-        var job = Runtime.TryQueueDb("admins-reload", async ct =>
+        var dataDirectory = Path.Combine(ModuleDirectory, "data");
+        var job = context.TryQueueDb<PermissionManager.PreparedAdminReload>("admins-reload", async _ =>
         {
-            var groupsWritten = await permissionManager.CreateGroupsJsonFile().ConfigureAwait(false);
-            var (admins, adminsWritten) = await permissionManager.CreateAdminsJsonFileWithStatus().ConfigureAwait(false);
-            return (groupsWritten, admins, adminsWritten);
-        }) ?? throw new InvalidOperationException("database queue full");
+            // Everything is read first; the files are replaced only if all reads succeeded, so a failure at any
+            // point leaves both the files and the applied permissions as they were.
+            var prepared = await permissionManager.PrepareAdminReloadAsync().ConfigureAwait(false);
+            await permissionManager.CommitAdminFilesAsync(prepared, dataDirectory).ConfigureAwait(false);
+            return prepared;
+        });
+        if (job == null)
+        {
+            if (!context.IsCurrent) throw new OperationCanceledException(context.Token);
+            throw new InvalidOperationException("database queue full");
+        }
 
-        var (groupsWritten, admins, adminsWritten) = await job.ConfigureAwait(false);
+        var prepared = await job.ConfigureAwait(false);
         var adminsPath = ModuleDirectory + "/data/admins.json";
         var groupsPath = ModuleDirectory + "/data/groups.json";
 
         // Three separate game-thread items: the dispatcher's time budget can split them over world updates.
         // Order kept from the original: strip old + load admins, load groups, load admins again (CSS merges group
         // flags/immunity into admins that already exist, and only into domains that exist).
-        await Runtime.OnGameThread(() =>
+        // NOTE: each item is one synchronous CounterStrikeSharp call (read + parse + apply of a whole JSON file) that
+        // the dispatcher budget cannot interrupt; see docs/OPTIMIZATION_REPORT "Remaining limits".
+        await context.PostAsync(() =>
         {
-            if (!adminsWritten) return;
-            PermissionManager.ApplyAdminCache(admins);
+            if (!prepared.AdminsWritten) return;
+            PermissionManager.ApplyAdminCache(prepared.Admins);
             AdminManager.LoadAdminData(adminsPath);
         }).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        await Runtime.OnGameThread(() =>
+        await context.PostAsync(() =>
         {
-            if (groupsWritten) AdminManager.LoadAdminGroups(groupsPath);
+            if (prepared.GroupsWritten) AdminManager.LoadAdminGroups(groupsPath);
         }).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        await Runtime.OnGameThread(() =>
+        await context.PostAsync(() =>
         {
-            if (adminsWritten) AdminManager.LoadAdminData(adminsPath);
+            if (prepared.AdminsWritten) AdminManager.LoadAdminData(adminsPath);
             _logger?.LogInformation("Loaded admins!");
         }).ConfigureAwait(false);
     }

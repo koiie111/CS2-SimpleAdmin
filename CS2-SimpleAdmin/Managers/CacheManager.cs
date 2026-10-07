@@ -38,6 +38,12 @@ internal class CacheManager : IDisposable
     internal const int MaxBanPagesPerRefresh = 50;
     internal const int IpPageSize = 2000;
     internal const int MaxIpPagesPerRefresh = 25;
+
+    /// <summary>Accounts examined per refresh by the stale-IP prune sweep (bounds its CPU/allocation per pass).</summary>
+    internal const int IpPruneAccountsPerRefresh = 2000;
+
+    /// <summary>The SQL checksum of sa_players_ips is compared every N refreshes (a COUNT/SUM over the table).</summary>
+    internal const int IpChecksumEveryRefreshes = 15;
     internal static readonly TimeSpan Overlap = TimeSpan.FromSeconds(30);
 
     private readonly SemaphoreSlim _writer = new(1, 1);
@@ -50,6 +56,12 @@ internal class CacheManager : IDisposable
     private IpCursor? _ipCursor;
     private DateTime? _ipDrainStartedAt;
     private bool _needsFullRebuild;
+    private ulong[]? _pruneAccounts;
+    private int _pruneNext;
+    private int _refreshesSinceIpChecksum;
+    private bool _ipChecksumSuspect;
+    internal long IpRebuilds;
+    internal long IpPrunedPasses;
 
     internal readonly record struct IpCursor(DateTime UsedAt, long SteamId, uint Address);
 
@@ -84,6 +96,10 @@ internal class CacheManager : IDisposable
         "SELECT steamid, name, address, used_at FROM sa_players_ips " +
         "WHERE used_at > @t OR (used_at = @t AND (steamid > @s OR (steamid = @s AND address > @a))) " +
         "ORDER BY used_at, steamid, address LIMIT @limit";
+
+    /// <summary>COUNT/SUM over the IP history newer than @cutoff: compared with <see cref="IpHistoryIndex.Checksum"/>.</summary>
+    internal const string IpChecksumSql =
+        "SELECT COUNT(*), COALESCE(SUM(steamid), 0), COALESCE(SUM(address), 0) FROM sa_players_ips WHERE used_at > @cutoff";
 
     private static async Task<(long Count, long IdSum)> ReadChecksumAsync(DbConnection connection, bool multiServer,
         int? serverId, CancellationToken ct)
@@ -139,23 +155,7 @@ internal class CacheManager : IDisposable
 
         var ipHistory = IpHistoryIndex.Empty;
         if (config.OtherSettings.CheckMultiAccountsByIp)
-        {
-            // Keyset pages (async I/O, bounded transient memory) folded into one index builder
-            var builder = new IpIndexBuilder(UnknownName());
-            var cursor = new IpCursor(DateTime.MinValue, -1, 0);
-            while (true)
-            {
-                var page = (await connection.QueryAsync<IpHistoryRow>(new CommandDefinition(IpHistoryPageSql,
-                    new { t = cursor.UsedAt, s = cursor.SteamId, a = cursor.Address, limit = IpPageSize },
-                    cancellationToken: ct)).ConfigureAwait(false)).AsList();
-                builder.Add(page);
-                if (page.Count < IpPageSize) break;
-                var last = page[^1];
-                cursor = new IpCursor(last.Used_at, last.Steamid, last.Address);
-            }
-
-            ipHistory = builder.Build();
-        }
+            ipHistory = await ReadIpHistoryIndexAsync(connection, ct).ConfigureAwait(false);
 
         var ignored = new List<uint>();
         foreach (var ip in config.OtherSettings.IgnoredIps)
@@ -169,6 +169,28 @@ internal class CacheManager : IDisposable
         _ipDrainStartedAt = null;
         _needsFullRebuild = false;
         PluginMetrics.CacheFullBuild.RecordSince(start);
+    }
+
+    /// <summary>
+    /// Reads the whole IP history in keyset pages (async I/O, bounded transient memory) into a fresh index. Used by the
+    /// full build and by the checksum-triggered rebuild, so both give the same result.
+    /// </summary>
+    private static async Task<IpHistoryIndex> ReadIpHistoryIndexAsync(DbConnection connection, CancellationToken ct)
+    {
+        var builder = new IpIndexBuilder(UnknownName());
+        var cursor = new IpCursor(DateTime.MinValue, -1, 0);
+        while (true)
+        {
+            var page = (await connection.QueryAsync<IpHistoryRow>(new CommandDefinition(IpHistoryPageSql,
+                new { t = cursor.UsedAt, s = cursor.SteamId, a = cursor.Address, limit = IpPageSize },
+                cancellationToken: ct)).ConfigureAwait(false)).AsList();
+            builder.Add(page);
+            if (page.Count < IpPageSize) break;
+            var last = page[^1];
+            cursor = new IpCursor(last.Used_at, last.Steamid, last.Address);
+        }
+
+        return builder.Build();
     }
 
     // ------------------------------------------------------------------ incremental refresh
@@ -220,18 +242,29 @@ internal class CacheManager : IDisposable
             if (dbCount != next.ActiveCount || dbIdSum != next.ActiveIdSum)
                 next = await ReconcileAsync(connection, next, multiServer, serverId, ct).ConfigureAwait(false);
 
-            // 3) IP history delta
+            // 3) IP history: delta in, stale/deleted links out
             var ipDrained = true;
             DateTime? lastIpUsedAt = null;
+            var ipRebuilt = false;
             if (config.OtherSettings.CheckMultiAccountsByIp)
             {
                 (next, ipDrained, lastIpUsedAt) = await RefreshIpHistoryAsync(connection, next, ct).ConfigureAwait(false);
+                next = PruneStaleIpHistory(next, config.OtherSettings.ExpireOldIpBans);
+                (next, ipRebuilt) = await ReconcileIpHistoryAsync(connection, next, config.OtherSettings.ExpireOldIpBans, ct)
+                    .ConfigureAwait(false);
             }
 
             // 4) publish, then advance watermarks
             Publish(next);
             _banWatermark = dbNow;
-            if (config.OtherSettings.CheckMultiAccountsByIp)
+            if (ipRebuilt)
+            {
+                // The index was rebuilt from everything SQL holds right now: nothing older is pending
+                _ipWatermark = dbNow;
+                _ipDrainStartedAt = null;
+                _ipCursor = null;
+            }
+            else if (config.OtherSettings.CheckMultiAccountsByIp)
             {
                 if (ipDrained)
                 {
@@ -333,6 +366,74 @@ internal class CacheManager : IDisposable
         return (next, false, lastUsedAt);
     }
 
+    /// <summary>
+    /// Removes links older than ExpireOldIpBans days (the SQL job deletes those rows) from memory, a bounded slice of
+    /// accounts per refresh, so the index shrinks like the table without a full scan. Correctness of lookups does not
+    /// wait for this: lookups apply the cutoff themselves (see <see cref="BanCacheSnapshot"/>).
+    /// </summary>
+    private BanCacheSnapshot PruneStaleIpHistory(BanCacheSnapshot next, int expireOldIpBansDays)
+    {
+        if (expireOldIpBansDays <= 0)
+        {
+            _pruneAccounts = null;
+            return next;
+        }
+
+        if (_pruneAccounts == null || _pruneNext >= _pruneAccounts.Length)
+        {
+            _pruneAccounts = next.IpHistory.AccountIds();
+            _pruneNext = 0;
+        }
+
+        var take = Math.Min(IpPruneAccountsPerRefresh, _pruneAccounts.Length - _pruneNext);
+        if (take <= 0) return next;
+        var cutoff = Time.ActualDateTime().AddDays(-expireOldIpBansDays);
+        var pruned = next.WithIpPrune(cutoff, _pruneAccounts.AsSpan(_pruneNext, take));
+        _pruneNext += take;
+        if (!ReferenceEquals(pruned, next)) IpPrunedPasses++;
+        return pruned;
+    }
+
+    /// <summary>
+    /// Detects IP-history rows deleted outside the expiry rule (site clean-up, manual DELETE) by comparing a COUNT/SUM
+    /// of SQL with the same triple over the index, every <see cref="IpChecksumEveryRefreshes"/> refreshes. A mismatch
+    /// must repeat on the next refresh (rows inserted while counting would otherwise look like a difference) before the
+    /// index is rebuilt from SQL, in the background, in bounded pages.
+    /// </summary>
+    private async Task<(BanCacheSnapshot, bool Rebuilt)> ReconcileIpHistoryAsync(DbConnection connection, BanCacheSnapshot next,
+        int expireOldIpBansDays, CancellationToken ct)
+    {
+        if (!_ipChecksumSuspect && ++_refreshesSinceIpChecksum < IpChecksumEveryRefreshes) return (next, false);
+        _refreshesSinceIpChecksum = 0;
+
+        var cutoff = expireOldIpBansDays > 0 ? Time.ActualDateTime().AddDays(-expireOldIpBansDays) : DateTime.MinValue;
+        await using var reader = await connection.ExecuteReaderAsync(new CommandDefinition(IpChecksumSql, new { cutoff },
+            cancellationToken: ct)).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return (next, false);
+        var sql = (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)), Convert.ToInt64(reader.GetValue(2)));
+        await reader.CloseAsync().ConfigureAwait(false);
+
+        if (next.IpHistory.Checksum(cutoff) == sql)
+        {
+            _ipChecksumSuspect = false;
+            return (next, false);
+        }
+
+        if (!_ipChecksumSuspect)
+        {
+            _ipChecksumSuspect = true; // confirm on the next refresh
+            return (next, false);
+        }
+
+        _ipChecksumSuspect = false;
+        IpRebuilds++;
+        Interlocked.Increment(ref PluginMetrics.CacheReconciles);
+        RateLimitedLog.Warning("cache.ip.rebuild", "sa_players_ips differs from the cached IP history (rows removed outside expiry?); rebuilding it");
+        var rebuilt = await ReadIpHistoryIndexAsync(connection, ct).ConfigureAwait(false);
+        _pruneAccounts = null;
+        return (next.WithIpIndex(rebuilt), true);
+    }
+
     private static async Task<DateTime> GetDatabaseTimeAsync(DbConnection connection, CancellationToken ct)
     {
         // CURRENT_TIMESTAMP is in the session time zone on MySQL and UTC on SQLite – the same clocks
@@ -390,8 +491,9 @@ internal class CacheManager : IDisposable
 
     public List<BanRecord> GetActiveBans() => [..Snapshot.ActiveBans.Values];
 
-    public List<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(string ipAddress) =>
-        IpHelper.TryConvertIpToUint(ipAddress, out var ip) ? [..Snapshot.GetAccountsByIp(ip)] : [];
+    public List<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(string ipAddress, DateTime now,
+        int expireOldIpBansDays) =>
+        IpHelper.TryConvertIpToUint(ipAddress, out var ip) ? [..Snapshot.GetAccountsByIp(ip, now, expireOldIpBansDays)] : [];
 
     public bool HasIpForPlayer(ulong steamId, string ipAddress)
     {
@@ -510,7 +612,7 @@ internal class CacheManager : IDisposable
     {
         var s = Snapshot;
         return $"cache: initialized={s.IsInitialized} activeBans={s.ActiveCount} steamKeys={s.BySteamId.Count} ipKeys={s.ByIp.Count} " +
-               $"ipHistoryAccounts={s.IpAccountCount} ipHistoryAddresses={s.IpAddressCount} ipOverlay={s.IpHistory.OverlayCount} banWatermark={_banWatermark:O} ipWatermark={_ipWatermark:O}\n";
+               $"ipHistoryAccounts={s.IpAccountCount} ipHistoryAddresses={s.IpAddressCount} ipOverlay={s.IpHistory.OverlayCount} ipRebuilds={IpRebuilds} ipPrunePasses={IpPrunedPasses} banWatermark={_banWatermark:O} ipWatermark={_ipWatermark:O}\n";
     }
 
     /// <summary>
