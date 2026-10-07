@@ -175,6 +175,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid.SteamId64, adminInfo, reason, time);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Ban");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Ban, reason, time,
@@ -236,6 +237,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await BanManager.AddBanBySteamid(steamid, adminInfo, reason, time);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Ban");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Ban, reason, time,
@@ -441,6 +443,7 @@ public partial class CS2_SimpleAdmin
         if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
         {
             int? penaltyId = await WarnManager.WarnPlayer(playerInfo, adminInfo, reason, time);
+            if (penaltyId == null) await ReportWriteFailureAsync(caller, "Warn");
             await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Warn, reason, time,
@@ -533,6 +536,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
             {
                 int? penaltyId = await WarnManager.AddWarnBySteamid(steamid.SteamId64, adminInfo, reason, time);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Warn");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Warn, reason, time,

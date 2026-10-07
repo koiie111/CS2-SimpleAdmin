@@ -82,6 +82,7 @@ public partial class CS2_SimpleAdmin
         if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time);
+            if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
             await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Gag, reason, time,
@@ -159,6 +160,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 3);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Gag, reason, time,
@@ -227,6 +229,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Gag, reason, time,
@@ -391,6 +394,7 @@ public partial class CS2_SimpleAdmin
         if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 1);
+            if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
             await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Mute, reason, time,
@@ -491,6 +495,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time, 1);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Mute, reason, time,
@@ -542,6 +547,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 1);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Mute, reason, time,
@@ -702,6 +708,7 @@ public partial class CS2_SimpleAdmin
         if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 2); 
+            if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
             await Runtime.OnGameThread(() =>
             {
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Silence, reason, time,
@@ -804,6 +811,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid, adminInfo, reason, time, 2);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamId, adminInfo, PenaltyType.Silence, reason,
@@ -855,6 +863,7 @@ public partial class CS2_SimpleAdmin
             if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
             {
                 int? penaltyId = await MuteManager.AddMuteBySteamid(steamid.SteamId64, adminInfo, reason, time, 2);
+                if (penaltyId == null) await ReportWriteFailureAsync(caller, "Gag/mute/silence");
                 await Runtime.OnGameThread(() =>
                 {
                     SimpleAdminApi?.OnPlayerPenaltiedAddedEvent(steamid, adminInfo, PenaltyType.Silence, reason,

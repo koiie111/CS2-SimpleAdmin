@@ -128,6 +128,13 @@ public partial class CS2_SimpleAdmin
     internal static bool TryQueuePenaltyWork(CCSPlayerController? caller, CommandInfo? command, string operation,
         Func<CancellationToken, Task> work)
     {
+        if (!EnsureDatabaseReady(command))
+        {
+            if (command == null && caller is { IsValid: true })
+                caller.PrintToChat("[CS2-SimpleAdmin] Database not ready - the action was NOT saved. Try again in a moment.");
+            return false;
+        }
+
         if (Runtime.TryQueueDb(operation, work)) return true;
 
         const string message = "[CS2-SimpleAdmin] Database queue is full or unavailable - the action was NOT saved. Try again.";

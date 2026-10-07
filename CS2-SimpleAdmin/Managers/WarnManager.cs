@@ -42,8 +42,9 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
 
             return warnId;
         }
-        catch(Exception)
+        catch (Exception ex)
         {
+            Infrastructure.RateLimitedLog.Error("warns.1", ex, "Warn database operation failed");
             return null;
         }
     }
@@ -82,8 +83,9 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
 
             return warnId;
         }
-        catch
+        catch (Exception ex)
         {
+            Infrastructure.RateLimitedLog.Error("warns.2", ex, "Warn database operation failed");
             return null;
         }
     }
@@ -108,8 +110,9 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
 
             return warns.ToList();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Infrastructure.RateLimitedLog.Error("warns.3", ex, "Warn database operation failed");
             return [];
         }
     }
@@ -132,8 +135,9 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
             var warnsCount = await connection.ExecuteScalarAsync<int>(sql, new { PlayerSteamID = steamId, serverid = CS2_SimpleAdmin.ServerId });
             return warnsCount;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Infrastructure.RateLimitedLog.Error("warns.4", ex, "Warn database operation failed");
             return 0;
         }
     }

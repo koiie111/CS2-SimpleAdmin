@@ -101,8 +101,9 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
 
             return muteId;
         }
-        catch
+        catch (Exception ex)
         {
+            CS2_SimpleAdmin._logger?.LogError("Unable to add mute for {SteamId}: {Error}", playerSteamId, ex.Message);
             return null;
         }
     }
@@ -137,8 +138,9 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             var activeMutes = (await connection.QueryAsync(sql, parameters)).ToList();
             return activeMutes;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Infrastructure.RateLimitedLog.Error("mutes.active", ex, "Unable to read active mutes");
             return [];
         }
     }
