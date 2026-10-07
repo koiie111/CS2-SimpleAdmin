@@ -20,7 +20,7 @@ public class R8_BoundedGameThreadWorkTests
     {
         await using var c = await db.OpenAsync();
         await using var tx = await c.BeginTransactionAsync();
-        var longReason = new string('r', 5000);
+        var longReason = new string('r', 250); // sa_warns.reason is VARCHAR(255); longer than the 80-char menu cut
         var sql = "INSERT INTO sa_warns (player_steamid, player_name, admin_steamid, admin_name, reason, duration, ends, created, status, server_id) " +
                   "VALUES (@steam, 'p', 0, 'Console', @reason, 0, @ends, @created, @status, 1)";
         var rows = Enumerable.Range(0, count).Select(i => new

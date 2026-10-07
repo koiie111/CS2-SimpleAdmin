@@ -64,7 +64,7 @@ foreach (var rows in quick ? new[] { 10_000, 100_000 } : new[] { 10_000, 100_000
     var oldPass = Measure.Op(() => { foreach (var p in online) oldCache.IsPlayerOrAnyIpBanned("n", p.SteamId, p.Ip, now); }, rows >= 1_000_000 ? 3 : 20);
     var newPass = Measure.Op(() => { foreach (var p in online) snapshot.CheckPlayerOrAnyIp(p.SteamId, p.Ip, 1, 0, true, now); }, 500);
     var accountsOld = Measure.Op(() => oldCache.GetAccountsByIp(online[0].Ip), rows >= 1_000_000 ? 5 : 50);
-    var accountsNew = Measure.Op(() => snapshot.GetAccountsByIp(IpHelper.IpToUint(online[0].Ip)), 20_000);
+    var accountsNew = Measure.Op(() => snapshot.GetAccountsByIp(IpHelper.IpToUint(online[0].Ip), now, 0), 20_000);
     periodicRows.Add($"| {rows:N0} | {oldPass.P50 / 1000:F1} | {newPass.P50 / 1000:F3} | {accountsOld.P50:F0} | {accountsNew.P50:F2} |");
 
     // C: incremental refresh on the large snapshot
@@ -235,6 +235,106 @@ foreach (var p in new[] { 16, 32, 64 })
 
 Line();
 Line("Not included: the old code also resolved every player's ObserverPawn handle (native) on every call and created a controller wrapper per recipient; the new code resolves pawns only after connect/team/spawn/round events (or once per second) and reads the recipient slot directly.");
+
+// ---------------------------------------------------------------- J: costs added by the review fixes (R1-R9)
+Line();
+Line("## J. Cost of the mechanisms added by the review fixes (background unless stated)");
+Line();
+{
+    var rows = quick ? 100_000 : 1_000_000;
+    var (bans, history, accounts) = Data.Generate(rows, now);
+    var builder = new IpIndexBuilder("Unknown");
+    builder.Add(history);
+    var index = builder.Build();
+    var cutoff = now.AddDays(-30);
+    Line($"IP history index with {rows:N0} rows ({index.AccountCount:N0} accounts, {index.AddressCount:N0} addresses); ExpireOldIpBans = 30 days (about 91% of the generated rows are older).");
+    Line();
+    Line("| operation | thread | p50 | max | alloc/op |");
+    Line("|---|---|---:|---:|---:|");
+
+    var ids = index.AccountIds();
+    var idStats = Measure.Op(() => index.AccountIds(), quick ? 5 : 3);
+    Line($"| AccountIds() — start of one prune cycle | DB worker | {idStats.P50 / 1000:F1} ms | {idStats.Max / 1000:F1} ms | {idStats.BytesPerOp / 1048576.0:F1} MB |");
+
+    var slice = ids.Take(CacheManager.IpPruneAccountsPerRefresh).ToArray();
+    var catchUp = Measure.Op(() => index.Prune(cutoff, slice), 30);
+    Line($"| Prune of {slice.Length:N0} accounts, all with stale links (worst case of the catch-up phase) | DB worker, once per 61 s pass | {catchUp.P50 / 1000:F2} ms | {catchUp.Max / 1000:F2} ms | {catchUp.BytesPerOp / 1024:N0} KB |");
+
+    var fresh = index.Prune(cutoff, ids); // everything stale is gone
+    var freshSlice = fresh.AccountIds().Take(CacheManager.IpPruneAccountsPerRefresh).ToArray();
+    var steady = Measure.Op(() => fresh.Prune(cutoff, freshSlice), 200);
+    Line($"| Prune of {freshSlice.Length:N0} accounts, nothing stale (steady state) | DB worker, once per 61 s pass | {steady.P50:F0} µs | {steady.Max:F0} µs | {steady.BytesPerOp / 1024:N0} KB |");
+
+    var checksum = Measure.Op(() => index.Checksum(cutoff), quick ? 10 : 5);
+    Line($"| Checksum(cutoff) for the SQL comparison | DB worker, every {CacheManager.IpChecksumEveryRefreshes}th pass | {checksum.P50 / 1000:F1} ms | {checksum.Max / 1000:F1} ms | {checksum.BytesPerOp:N0} B |");
+    Line();
+    Line("The game thread only reads the published snapshot; none of the above runs on it. They compete with CS2 for CPU and the GC, so the slice size (`IpPruneAccountsPerRefresh`) and cadence are the knobs if a weak CPU shows interference.");
+    Line();
+
+    // work queue: cost of accepting + completing a job, with and without the captured context
+    using var lifetime = new CancellationTokenSource();
+    var withContext = new BoundedWorkQueue("bench", 4096, 1, lifetime.Token, captureContext: () => new WorkContext(Runtime.Context, 1));
+    var withoutContext = new BoundedWorkQueue("bench", 4096, 1, lifetime.Token);
+    static async Task Drain(BoundedWorkQueue q, int jobs)
+    {
+        Task? last = null;
+        for (var k = 0; k < jobs; k++)
+        {
+            Task<int>? t;
+            while ((t = q.TryEnqueue<int>("bench", _ => Task.FromResult(1))) == null) await Task.Yield();
+            last = t;
+        }
+
+        await last!;
+    }
+
+    await Drain(withContext, 2000);
+    await Drain(withoutContext, 2000);
+    var a0 = GC.GetAllocatedBytesForCurrentThread();
+    var sw1 = Stopwatch.StartNew();
+    await Drain(withContext, 50_000);
+    sw1.Stop();
+    var allocCtx = (GC.GetAllocatedBytesForCurrentThread() - a0) / 50_000;
+    var sw2 = Stopwatch.StartNew();
+    await Drain(withoutContext, 50_000);
+    sw2.Stop();
+    Line($"Work queue, 50,000 trivial typed jobs: with captured WorkContext {sw1.Elapsed.TotalMicroseconds / 50_000:F2} µs/job (producer-side allocation {allocCtx} B/job), without {sw2.Elapsed.TotalMicroseconds / 50_000:F2} µs/job. The context is one small object per accepted job.");
+    Line();
+
+    // compare-and-set statement for a full batch
+    var steps = Enumerable.Range(1, 64).Select(k => new OnlineCreditStep(k, 0, 1)).ToList();
+    var cas = Measure.Op(() => CS2_SimpleAdmin.Database.SharedQueries.ApplyOnlineCredit(steps), 5000);
+    Line($"Online-time compare-and-set statement for one batch of 64 mutes: text built in p50 {cas.P50:F1} µs ({cas.BytesPerOp / 1024:N1} KB); one UPDATE per batch, same as the unfixed set-based code.");
+    Line();
+    lifetime.Cancel();
+}
+
+// ---------------------------------------------------------------- K: CounterStrikeSharp admin loaders (game-thread apply)
+Line("## K. CounterStrikeSharp AdminManager.LoadAdminData / LoadAdminGroups (run on the game thread by the plugin)");
+Line();
+Line("CSS 1.0.369 exposes only file-path overloads: read the file, parse the JSON and apply it in one synchronous call, so the dispatcher budget cannot split it. `AdminManager` needs the engine (its type initializer fails in a plain process), so the real call cannot be timed here. Lower bound below: only reading and parsing an equivalent file (N admins, 3 flags + 1 group each); CSS's apply (permission/group dictionaries per admin) comes on top and MUST be measured in the game.");
+Line();
+Line("| admins | file KB | read+parse p50 | max | alloc/op |");
+Line("|---:|---:|---:|---:|---:|");
+foreach (var n in new[] { 10, 100, 1000, 5000 })
+{
+    var path = Path.Combine(Path.GetTempPath(), $"sa_admins_{n}.json");
+    var json = new StringBuilder("{");
+    for (var k = 0; k < n; k++)
+    {
+        if (k > 0) json.Append(',');
+        json.Append("\"admin").Append(k).Append("\":{\"identity\":\"").Append(76561198000000000UL + (ulong)k)
+            .Append("\",\"immunity\":").Append(k % 100).Append(",\"flags\":[\"@css/ban\",\"@css/kick\",\"@css/chat\"],\"groups\":[\"#g").Append(k % 5).Append("\"]}");
+    }
+
+    json.Append('}');
+    File.WriteAllText(path, json.ToString());
+    var stats = Measure.Op(() => System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(File.ReadAllText(path)), n >= 5000 ? 20 : 100);
+    Line($"| {n:N0} | {new FileInfo(path).Length / 1024.0:F0} | {stats.P50 / 1000:F2} ms | {stats.Max / 1000:F2} ms | {stats.BytesPerOp / 1024:N0} KB |");
+    File.Delete(path);
+}
+
+Line();
 
 var outPath = args.FirstOrDefault(a => a.EndsWith(".md"));
 if (outPath != null) File.WriteAllText(outPath, sb.ToString());

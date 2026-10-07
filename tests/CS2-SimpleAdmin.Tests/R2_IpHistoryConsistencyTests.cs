@@ -184,7 +184,10 @@ public class R2_IpHistoryConsistencyTests
         await cache.InitializeCacheAsync(config, null, default);
         for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 3; i++)
         {
-            await AddIp(db, (ulong)(100 + i), $"10.1.0.{i % 200 + 1}", DateTime.UtcNow);
+            // stamped by the database clock, as the plugin's own upsert does (CURRENT_TIMESTAMP); a literal UTC time would be
+            // hours behind a MySQL server in another time zone and legitimately invisible to the incremental reader
+            await Exec(db, "INSERT INTO sa_players_ips(steamid,address,name,used_at) VALUES (@steam,@ip,'n',CURRENT_TIMESTAMP)",
+                new { steam = (ulong)(100 + i), ip = IpHelper.IpToUint($"10.1.0.{i % 200 + 1}") });
             await cache.RefreshCacheAsync(config, null, default);
         }
 
