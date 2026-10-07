@@ -191,11 +191,25 @@ internal class PlayerManager
             {
                 if (!ControllerAvailable(session))
                 {
+                    if (Runtime.Sessions.IsCurrent(session))
+                    {
+                        // Same connection whose controller is not resolvable yet: retry (as the normal path does) so the
+                        // kick is not lost; a disconnected session is never revived
+                        OnLoadFailed(session, attempt, "controller not available when the ban result arrived");
+                        return;
+                    }
+
                     Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
                     return;
                 }
 
-                session.CompleteLoad(attempt); // a banned connection is finished: it is being kicked
+                // Finish this attempt first: only the attempt that completes it kicks (exactly one kick per connection)
+                if (!session.CompleteLoad(attempt))
+                {
+                    Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
+                    return;
+                }
+
                 KickBanned(session);
             }).ConfigureAwait(false);
             PluginMetrics.ConnectLoad.RecordSince(start);
