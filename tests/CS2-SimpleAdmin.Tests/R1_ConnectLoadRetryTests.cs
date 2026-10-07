@@ -73,7 +73,7 @@ public class R1_ConnectLoadRetryTests
             await c.ExecuteAsync(db.Provider.GetAddMuteQuery(true), new
             {
                 playerSteamid = 76561198000000001UL, playerName = "p", adminSteamid = 0, adminName = "Console", muteReason = "r",
-                duration = 60, ends = DateTime.Now.AddHours(1), created = DateTime.Now, type = "MUTE", serverid = 1
+                duration = 60, ends = Time.ActualDateTime().AddHours(1), created = Time.ActualDateTime(), type = "MUTE", serverid = 1
             });
         return (h, provider, db);
     }

@@ -41,7 +41,7 @@ public class R11_PenaltyOrderingTests
             await c.ExecuteAsync("INSERT INTO sa_mutes(player_steamid,player_name,admin_steamid,admin_name,reason,duration,ends,created,type,server_id) VALUES (@steam,'p',0,'Console',@reason,0,@t,@t,'MUTE',1)", new { steam = steam.ToString(), reason, t = DateTime.UtcNow });
         }
         await Insert("old");
-        PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, DateTime.Now, 0);
+        PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, Time.ActualDateTime(), 0);
         PenaltyRemoval.IsTargetCurrent = _ => true;
         PenaltyRemoval.ResetVoice = _ => { };
         try
@@ -52,7 +52,7 @@ public class R11_PenaltyOrderingTests
             // A subsequent mute command accepts SQL work and immediately adds its in-memory penalty,
             // as Commands/basecomms.cs does. SQLite uses one queue worker, so its SQL runs after old apply.
             Assert.True(CS2_SimpleAdmin.TryQueuePenaltyWork(CallerRef.Console, null, "mute-write", _ => Insert("new")));
-            PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 0);
+            PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 0);
             await world.PumpUntil(() => Runtime.Db!.Pending == 0);
             await using var c = await db.OpenAsync();
             var active = await c.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM sa_mutes WHERE reason='new' AND status='ACTIVE'");
@@ -71,8 +71,8 @@ public class R11_PenaltyOrderingTests
         using var world = new TestWorld();
         TestConfig.Use();
         var target = new PenaltyRemoval.Target(5, 11, 76561198000000042);
-        PlayerPenaltyManager.AddPenalty(target.Slot, removed, DateTime.Now, 0);
-        PlayerPenaltyManager.AddPenalty(target.Slot, retained, DateTime.Now, 0);
+        PlayerPenaltyManager.AddPenalty(target.Slot, removed, Time.ActualDateTime(), 0);
+        PlayerPenaltyManager.AddPenalty(target.Slot, retained, Time.ActualDateTime(), 0);
         var voiceResets = 0;
         PenaltyRemoval.IsTargetCurrent = _ => true;
         PenaltyRemoval.ResetVoice = _ => voiceResets++;
@@ -108,7 +108,7 @@ public class R11_PenaltyOrderingTests
         using var world = new TestWorld();
         TestConfig.Use();
         using var voice = new Voice();
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.ApplyToTarget(Target, 1, false);
         Assert.Equal(1, voice.Resets);
     }
@@ -121,8 +121,8 @@ public class R11_PenaltyOrderingTests
         using var world = new TestWorld();
         TestConfig.Use();
         using var voice = new Voice();
-        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), DateTime.Now.AddHours(1), 60);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), Time.ActualDateTime().AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.ApplyToTarget(Target, type, false);
         Assert.Equal(1, voice.Resets);
         Assert.True(PlayerPenaltyManager.IsPenalized(Target.Slot, PenaltyType.Gag, out _));
@@ -136,8 +136,8 @@ public class R11_PenaltyOrderingTests
         using var world = new TestWorld();
         TestConfig.Use();
         using var voice = new Voice();
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, DateTime.Now.AddHours(1), 60);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(voicePenalty), DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, Time.ActualDateTime().AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(voicePenalty), Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.ApplyToTarget(Target, type, false);
         Assert.Equal(0, voice.Resets);
         Assert.True(PlayerPenaltyManager.IsPenalized(Target.Slot, Kind(voicePenalty), out _));
@@ -197,10 +197,10 @@ public class R11_PenaltyOrderingTests
         TestConfig.Use();
         using var voice = new Voice();
         var kind = Kind(type);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, DateTime.Now.AddHours(1), 60); // old 1
-        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, DateTime.Now.AddHours(2), 120); // old 2 (several of one type)
+        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, Time.ActualDateTime().AddHours(1), 60); // old 1
+        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, Time.ActualDateTime().AddHours(2), 120); // old 2 (several of one type)
         var acceptedAt = PlayerPenaltyManager.NextRevision(); // the unmute is accepted here
-        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, DateTime.Now.AddHours(3), 180); // issued while the unmute waits
+        PlayerPenaltyManager.AddPenalty(Target.Slot, kind, Time.ActualDateTime().AddHours(3), 180); // issued while the unmute waits
 
         PenaltyRemoval.ApplyToTarget(Target, type, false, acceptedAt);
 
@@ -219,7 +219,7 @@ public class R11_PenaltyOrderingTests
         var loadAcceptedAt = PlayerPenaltyManager.NextRevision(); // connect load queued
         var unmuteAcceptedAt = PlayerPenaltyManager.NextRevision(); // unmute accepted while the load is in flight
         // the load result is applied only now, but it belongs to the earlier position
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60, loadAcceptedAt);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60, loadAcceptedAt);
         PenaltyRemoval.ApplyToTarget(Target, 1, false, unmuteAcceptedAt);
         Assert.False(PlayerPenaltyManager.IsPenalized(Target.Slot, PenaltyType.Mute, out _));
         Assert.Equal(1, voice.Resets);
@@ -233,7 +233,7 @@ public class R11_PenaltyOrderingTests
         using var voice = new Voice();
         var unmuteAcceptedAt = PlayerPenaltyManager.NextRevision();
         var loadAcceptedAt = PlayerPenaltyManager.NextRevision();
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60, loadAcceptedAt);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60, loadAcceptedAt);
         PenaltyRemoval.ApplyToTarget(Target, 1, false, unmuteAcceptedAt);
         Assert.True(PlayerPenaltyManager.IsPenalized(Target.Slot, PenaltyType.Mute, out _));
         Assert.Equal(0, voice.Resets);
@@ -251,7 +251,7 @@ public class R11_PenaltyOrderingTests
         try
         {
             var acceptedAt = PlayerPenaltyManager.NextRevision();
-            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60); // new connection's, loaded later
+            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60); // new connection's, loaded later
             CS2_SimpleAdmin.PlayersInfo[Steam] = new PlayerInfo(12, 5, new SteamID(Steam), "p", null, 0, 3, 0, 0, 0) { IsLoaded = true };
 
             PenaltyRemoval.ApplyToTarget(Target, 1, true, acceptedAt); // target = userid 11
@@ -270,10 +270,10 @@ public class R11_PenaltyOrderingTests
         TestConfig.Use();
         using var voice = new Voice();
         CS2_SimpleAdmin.PlayersInfo[Steam] = new PlayerInfo(11, 5, new SteamID(Steam), "p", null, 0, 4, 0, 0, 0) { IsLoaded = true };
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
         var acceptedAt = PlayerPenaltyManager.NextRevision();
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.ApplyToTarget(Target, 1, true, acceptedAt);
         Assert.Equal(3, CS2_SimpleAdmin.PlayersInfo[Steam].TotalMutes);
         Assert.Equal(1, InMemory(PenaltyType.Mute));
@@ -344,7 +344,7 @@ public class R11_PenaltyOrderingTests
         {
             Assert.True(CS2_SimpleAdmin.TryQueuePenaltyWork(CallerRef.Console, null, "mute-write",
                 _ => Db.AddAsync(type, label, sqlDelayMs), orderKey: Keyed ? Steam : null));
-            PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), DateTime.Now.AddHours(1), 60);
+            PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), Time.ActualDateTime().AddHours(1), 60);
         }
 
         public void Remove(int type, int sqlDelayBeforeReadMs = 0)
@@ -394,7 +394,7 @@ public class R11_PenaltyOrderingTests
         using var f = new OrderFixture(singleWorker);
         // an older penalty exists in both places
         await f.Db.AddAsync(type, "old", 0);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), Time.ActualDateTime().AddHours(1), 60);
 
         f.Remove(type, sqlDelayBeforeReadMs: 150); // slow to start; a fast INSERT accepted later could overtake it
         f.Issue(type, "new");
@@ -474,7 +474,7 @@ public class R11_PenaltyOrderingTests
     {
         using var f = new OrderFixture(singleWorker);
         await f.Db.AddAsync(1, "old", 0);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.UnmuteSql = (_, _, _, _) => Task.FromResult(UnmuteOutcome.Failed);
         Assert.True(PenaltyRemoval.TryQueue(CallerRef.Console, "0", Steam.ToString(), "r", 1, Target, false, "Player"));
         f.Issue(1, "new");
@@ -493,7 +493,7 @@ public class R11_PenaltyOrderingTests
     {
         using var f = new OrderFixture(singleWorker: true);
         var gate = new TaskCompletionSource<UnmuteOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
-        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
+        PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
         PenaltyRemoval.UnmuteSql = (_, _, _, _) => gate.Task;
         Assert.True(PenaltyRemoval.TryQueue(CallerRef.Console, "0", Steam.ToString(), "r", 1, Target, false, "Bob"));
 
@@ -634,7 +634,7 @@ public class R11_PenaltyOrderingTests
             void Issue(int type, string reason, ulong steam)
             {
                 Assert.True(CS2_SimpleAdmin.TryQueuePenaltyWork(CallerRef.Console, null, "mute-write", _ => Insert(type, reason, steam), orderKey: steam));
-                PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), DateTime.Now.AddHours(1), 60);
+                PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), Time.ActualDateTime().AddHours(1), 60);
             }
 
             // A fresh player (SteamID) per round, so rounds never see each other's rows
@@ -655,7 +655,7 @@ public class R11_PenaltyOrderingTests
                 var second = next++;
                 PlayerPenaltyManager.RemoveAllPenalties();
                 await Insert(type, "old", second);
-                PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), DateTime.Now.AddHours(1), 60);
+                PlayerPenaltyManager.AddPenalty(Target.Slot, Kind(type), Time.ActualDateTime().AddHours(1), 60);
                 Assert.True(PenaltyRemoval.TryQueue(CallerRef.Console, "0", second.ToString(), "r", type, new PenaltyRemoval.Target(Target.Slot, 11, second), false));
                 Issue(type, "new", second);
                 await world.PumpUntil(() => Runtime.Db!.Pending == 0 && world.World.Pending == 0);

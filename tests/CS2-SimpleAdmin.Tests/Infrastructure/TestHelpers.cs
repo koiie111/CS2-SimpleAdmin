@@ -182,6 +182,7 @@ public static class TestDatabases
             var server = new MySqlConnectionStringBuilder
             {
                 Server = s.Host, Port = (uint)s.Port, UserID = "root", Pooling = true, ConvertZeroDateTime = true,
+                SslMode = MySqlSslMode.None, // loopback test containers; MySQL 5.7 cannot complete a handshake with current OpenSSL
                 ConnectionTimeout = 10, DefaultCommandTimeout = 60
             };
             await using (var conn = new MySqlConnection(server.ConnectionString))

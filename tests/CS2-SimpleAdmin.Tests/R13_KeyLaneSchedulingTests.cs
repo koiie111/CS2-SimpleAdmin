@@ -152,7 +152,7 @@ public class R13_KeyLaneSchedulingTests
                 await c.ExecuteAsync("INSERT INTO sa_mutes(player_steamid,player_name,admin_steamid,admin_name,reason,duration,ends,created,type,server_id) VALUES (@steam,'p',0,'Console','first',0,@t,@t,'MUTE',1)",
                     new { steam = Key.ToString(), t = DateTime.UtcNow });
             }, orderKey: Key));
-            PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, DateTime.Now, 0);
+            PlayerPenaltyManager.AddPenalty(target.Slot, PenaltyType.Mute, Time.ActualDateTime(), 0);
             await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
             foreach (var gate in otherGates)
             {

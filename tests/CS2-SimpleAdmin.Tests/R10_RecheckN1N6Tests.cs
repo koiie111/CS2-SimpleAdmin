@@ -794,8 +794,8 @@ public class R10_RecheckN1N6Tests
             PenaltyRemoval.IsTargetCurrent = _ => TargetStillThere;
             PenaltyRemoval.ResetVoice = _ => VoiceResets++;
             CallerRef.PrintToConsole = message => Console.Add(message);
-            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, DateTime.Now.AddHours(1), 60);
-            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, DateTime.Now.AddHours(1), 60);
+            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Mute, Time.ActualDateTime().AddHours(1), 60);
+            PlayerPenaltyManager.AddPenalty(Target.Slot, PenaltyType.Gag, Time.ActualDateTime().AddHours(1), 60);
         }
 
         public PenaltyRemoval.Target Target { get; } = new(5, 11, 76561198000000005);
