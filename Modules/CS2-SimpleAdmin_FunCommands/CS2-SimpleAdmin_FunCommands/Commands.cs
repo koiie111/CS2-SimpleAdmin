@@ -89,25 +89,6 @@ public partial class CS2_SimpleAdmin_FunCommands
         });
     }
 
-    [CommandHelper(1, "<#userid or name>")]
-    [RequiresPermissions("@css/cheats")]
-    private void OnRespawnCommand(CCSPlayerController? caller, CommandInfo command)
-    {
-        var targets = _sharedApi!.GetTarget(command);
-        if (targets == null) return;
-
-        var playersToTarget = targets.Players.Where(player =>
-            player is { IsValid: true, IsHLTV: false, Connected: PlayerConnectedState.PlayerConnected }).ToList();
-
-        playersToTarget.ForEach(player =>
-        {
-            if (caller!.CanTarget(player))
-            {
-                Respawn(caller, player);
-            }
-        });
-    }
-
     [CommandHelper(2, "<#userid or name> <weapon>")]
     [RequiresPermissions("@css/cheats")]
     private void OnGiveWeaponCommand(CCSPlayerController? caller, CommandInfo command)

@@ -89,20 +89,6 @@ public partial class CS2_SimpleAdmin_FunCommands
             NoClip);
     }
 
-    /// <summary>
-    /// Creates a player selection menu for respawn command.
-    /// PATTERN: CreateMenuWithPlayers with method reference
-    /// IMPROVED: Uses MenuContext to eliminate duplication
-    /// </summary>
-    private object CreateRespawnMenu(CCSPlayerController admin, CS2_SimpleAdminApi.MenuContext context)
-    {
-        return _sharedApi!.CreateMenuWithPlayers(
-            context,
-            admin,
-            admin.CanTarget,        // Filter: only targetable players (no LifeState check - can respawn dead players)
-            Respawn);               // Use the Respawn method which includes death position teleport
-    }
-
     // =================================
     // NESTED MENUS - PLAYER → VALUE SELECTION
     // =================================

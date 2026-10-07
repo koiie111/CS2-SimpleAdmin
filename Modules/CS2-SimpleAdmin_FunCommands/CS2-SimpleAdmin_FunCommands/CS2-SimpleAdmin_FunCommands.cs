@@ -158,14 +158,6 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
             }
         }
 
-        if (Config.RespawnCommands.Count > 0)
-        {
-            foreach (var command in Config.RespawnCommands)
-            {
-                _sharedApi.UnRegisterCommand(command);
-            }
-        }
-
         if (Config.GiveCommands.Count > 0)
         {
             foreach (var command in Config.GiveCommands)
@@ -229,9 +221,6 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
         if (Config.GodCommands.Count > 0)
             _sharedApi.UnregisterMenu("fun", "god");
 
-        if (Config.RespawnCommands.Count > 0)
-            _sharedApi.UnregisterMenu("fun", "respawn");
-
         if (Config.GiveCommands.Count > 0)
             _sharedApi.UnregisterMenu("fun", "give");
 
@@ -292,14 +281,6 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
             foreach (var command in Config.UnfreezeCommands)
             {
                 _sharedApi.RegisterCommand(command, "Unfreeze player", OnUnfreezeCommand);
-            }
-        }
-
-        if (Config.RespawnCommands.Count > 0)
-        {
-            foreach (var command in Config.RespawnCommands)
-            {
-                _sharedApi.RegisterCommand(command, "Respawn player", OnRespawnCommand);
             }
         }
 
@@ -388,11 +369,6 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
                 _sharedApi.RegisterMenu("fun", "noclip",
                     "fun_menu_noclip",
                     CreateNoClipMenu, "@css/cheats", "css_noclip", Localizer!);
-
-            if (Config.RespawnCommands.Count > 0)
-                _sharedApi.RegisterMenu("fun", "respawn",
-                    "fun_menu_respawn",
-                    CreateRespawnMenu, "@css/cheats", "css_respawn", Localizer!);
 
             if (Config.GiveCommands.Count > 0)
                 _sharedApi.RegisterMenu("fun", "give",

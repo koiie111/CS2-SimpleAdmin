@@ -137,62 +137,6 @@ public partial class CS2_SimpleAdmin_FunCommands
     }
 
     /// <summary>
-    /// Respawns a player and teleports them to their last death position if available.
-    /// This demonstrates using the GetPlayerInfo API to access player data.
-    /// </summary>
-    private void Respawn(CCSPlayerController? caller, CCSPlayerController player)
-    {
-        if (!player.IsValid) return;
-        if (!caller.CanTarget(player)) return;
-
-        var callerName = caller?.PlayerName ?? "Console";
-
-        // Respawn the player
-        player.Respawn();
-
-        // Get death position from API and teleport player to it
-        // BEST PRACTICE: Use API to access player data like death position
-        if (_sharedApi != null && player.UserId.HasValue)
-        {
-            try
-            {
-                var playerInfo = _sharedApi.GetPlayerInfo(player);
-
-                // Teleport to death position if available
-                if (playerInfo?.DiePosition != null && player.PlayerPawn?.Value != null)
-                {
-                    player.PlayerPawn.Value.Teleport(
-                        playerInfo.DiePosition.Position,
-                        playerInfo.DiePosition.Angle);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning($"Failed to get player info for respawn: {ex.Message}");
-            }
-        }
-
-        // Show admin activity using module's own localizer with per-player language support
-        var activityArgs = new object[] { "CALLER", player.PlayerName };
-        if (caller == null || !_sharedApi!.IsAdminSilent(caller))
-        {
-            if (Localizer != null)
-            {
-                _sharedApi!.ShowAdminActivityLocalized(Localizer, "fun_admin_respawn_message", callerName, false,
-                    activityArgs);
-            }
-            else
-            {
-                _sharedApi!.ShowAdminActivity("fun_admin_respawn_message", callerName, false, activityArgs);
-            }
-        }
-
-        // Log command using API
-        _sharedApi!.LogCommand(caller,
-            $"css_respawn {(string.IsNullOrEmpty(player.PlayerName) ? player.SteamID.ToString() : player.PlayerName)}");
-    }
-
-    /// <summary>
     /// Resizes a player's model to the specified scale.
     /// </summary>
     private void Resize(CCSPlayerController? caller, CCSPlayerController player, float size)

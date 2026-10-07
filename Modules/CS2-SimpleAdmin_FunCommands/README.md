@@ -22,7 +22,6 @@ This module provides fun admin commands:
 - **God Mode** (`css_god`) - Toggle god mode for players
 - **No Clip** (`css_noclip`) - Enable no-clip mode
 - **Freeze/Unfreeze** (`css_freeze`, `css_unfreeze`) - Freeze players in place
-- **Respawn** (`css_respawn`) - Respawn dead players
 - **Give Weapon** (`css_give`) - Give weapons to players
 - **Strip Weapons** (`css_strip`) - Remove all player weapons
 - **Set HP** (`css_hp`) - Set player health

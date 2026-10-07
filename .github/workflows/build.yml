@@ -93,8 +93,10 @@ jobs:
         with:
           artifacts: |
             CS2-SimpleAdmin-${{ needs.build.outputs.build_version }}.zip
-          name: "CS2-SimpleAdmin-${{ needs.build.outputs.build_version }}"
-          tag: "build-${{ needs.build.outputs.build_version }}"
+          name: "CS2-SimpleAdmin-${{ needs.build.outputs.build_version }} (build ${{ github.run_number }})"
+          tag: "build-${{ needs.build.outputs.build_version }}-${{ github.run_number }}"
+          commit: ${{ github.sha }}
+          makeLatest: true
           body: |
             Place the files in your server as follows:
 

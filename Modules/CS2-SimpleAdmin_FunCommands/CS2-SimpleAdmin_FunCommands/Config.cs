@@ -10,7 +10,6 @@ public class Config : IBasePluginConfig
     public List<string> GodCommands { get; set; } = ["css_god"];
     public List<string> FreezeCommands { get; set; } = ["css_freeze"];
     public List<string> UnfreezeCommands { get; set; } = ["css_unfreeze"];
-    public List<string> RespawnCommands { get; set; } = ["css_respawn"];
     public List<string> GiveCommands { get; set; } = ["css_give"];
     public List<string> StripCommands { get; set; } = ["css_strip"];
     public List<string> HpCommands { get; set; } = ["css_hp"];
