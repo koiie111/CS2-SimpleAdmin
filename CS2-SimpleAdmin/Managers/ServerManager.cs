@@ -128,7 +128,7 @@ public class ServerManager
             {
                 // Same fallback as before: global admins and renames still work without a server row
                 await LoadRenamesAsync(context).ConfigureAwait(false);
-                var fallback = await plugin.ReloadAdminsAsync().ConfigureAwait(false);
+                var fallback = await plugin.ReloadAdminsAsync(context).ConfigureAwait(false);
                 if (fallback != AdminReloadResult.Success)
                     CS2_SimpleAdmin._logger?.LogError("Fallback admin load ended with {result}; existing permissions are kept", fallback);
             }
@@ -212,13 +212,18 @@ public class ServerManager
     /// Startup step: reload admins until it succeeds, a bounded number of times. Canceled → cancellation; still failing
     /// after the retries → exception (startup then reports Failed instead of declaring the plugin ready).
     /// </summary>
-    internal static async Task ReloadAdminsWithRetriesAsync(Func<Task<AdminReloadResult>> reload, RuntimeContext context,
-        IReadOnlyList<TimeSpan>? delays = null)
+    internal static async Task ReloadAdminsWithRetriesAsync(Func<RuntimeContext, Task<AdminReloadResult>> reload,
+        RuntimeContext context, IReadOnlyList<TimeSpan>? delays = null)
     {
         delays ??= StepRetryDelays;
         for (var attempt = 0; ; attempt++)
         {
-            switch (await reload().ConfigureAwait(false))
+            // The startup belongs to `context`: a stale one must not start (or keep waiting for) a reload, and the
+            // reload is handed this context explicitly instead of resolving "the current runtime" by itself.
+            if (!context.IsCurrent) throw new OperationCanceledException(context.Token);
+            var result = await reload(context).ConfigureAwait(false);
+            if (!context.IsCurrent) throw new OperationCanceledException(context.Token);
+            switch (result)
             {
                 case AdminReloadResult.Success:
                     return;

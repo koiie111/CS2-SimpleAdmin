@@ -60,7 +60,7 @@ internal sealed class RuntimeContext(PluginLifetime lifetime, GameDispatcher dis
     /// code of an old lifetime can never put jobs into a newer lifetime's queue.
     /// </summary>
     public Task<T>? TryQueueDb<T>(string operation, Func<CancellationToken, Task<T>> work, CancellationToken cancellationToken = default) =>
-        IsCurrent ? Runtime.TryQueueDb(operation, work, cancellationToken) : null;
+        Runtime.TryQueueDbFor(this, operation, work, cancellationToken);
 
     /// <summary>Non-blocking post for game-thread callers (leaves silently if the context is stale or the queue full).</summary>
     public bool TryPost(Action action) =>
@@ -208,8 +208,12 @@ internal static class Runtime
         }
     }
 
-    /// <summary>The context a job accepted now must run under.</summary>
-    internal static WorkContext CaptureWork() => new(_context, CS2_SimpleAdmin.GlobalServerId);
+    /// <summary>
+    /// The context a job accepted now must run under. Work queued from inside a running job <b>inherits that job's
+    /// context</b> (lifetime, server id, caller): a producer of an old lifetime must never become a new job of the
+    /// current one. Only code that is not run by a queue worker (command, timer) gets the current runtime.
+    /// </summary>
+    internal static WorkContext CaptureWork() => WorkContext.Current ?? new WorkContext(_context, CS2_SimpleAdmin.GlobalServerId);
 
     /// <summary>Unload: cancel background work and drop queued game-thread work. Does not block.</summary>
     public static void Stop()
@@ -273,20 +277,58 @@ internal static class Runtime
 
     public static Task<T> OnGameThread<T>(Func<T> func) => (WorkContext.Current?.Runtime ?? _context).PostAsync(func);
 
-    /// <summary>Queues database work. Returns false (nothing runs) when the queue is full or not started.</summary>
-    public static bool TryQueueDb(string operation, Func<CancellationToken, Task> work) =>
-        Db?.TryEnqueue(operation, work) ?? false;
+    // Queue selection and the staleness check of the producing context happen under StartLock, the lock that Stop and
+    // Restart hold: a producer of an old lifetime is refused, and can never pick up a queue created by a newer Start.
+    // TryWrite never blocks, so holding the lock is cheap.
+
+    /// <summary>
+    /// Queues database work. Returns false (nothing runs) when the queue is full or not started, or when the producing
+    /// context (the ambient job context, else the current runtime) is stale.
+    /// </summary>
+    public static bool TryQueueDb(string operation, Func<CancellationToken, Task> work)
+    {
+        lock (StartLock)
+        {
+            var context = CaptureWork();
+            return context.Runtime.IsCurrent && (Db?.TryEnqueue(operation, work, context) ?? false);
+        }
+    }
 
     /// <summary>
     /// Queues database work under an explicit <see cref="WorkContext"/> (a server id and caller captured by the
-    /// code that validated the operation, rather than whatever is current when the queue accepts it).
+    /// code that validated the operation, rather than whatever is current when the queue accepts it). Refused when
+    /// that context's lifetime is no longer current.
     /// </summary>
-    public static bool TryQueueDb(string operation, Func<CancellationToken, Task> work, WorkContext context) =>
-        Db?.TryEnqueue(operation, work, context) ?? false;
+    public static bool TryQueueDb(string operation, Func<CancellationToken, Task> work, WorkContext context)
+    {
+        lock (StartLock)
+            return context.Runtime.IsCurrent && (Db?.TryEnqueue(operation, work, context) ?? false);
+    }
 
     public static Task<T>? TryQueueDb<T>(string operation, Func<CancellationToken, Task<T>> work,
-        CancellationToken cancellationToken = default) =>
-        Db?.TryEnqueue(operation, work, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        lock (StartLock)
+        {
+            var context = CaptureWork();
+            return context.Runtime.IsCurrent ? Db?.TryEnqueue(operation, work, cancellationToken, context) : null;
+        }
+    }
+
+    /// <summary>Queues typed work for an explicit runtime context (startup code); refused if that context is stale.</summary>
+    internal static Task<T>? TryQueueDbFor<T>(RuntimeContext runtime, string operation, Func<CancellationToken, Task<T>> work,
+        CancellationToken cancellationToken = default)
+    {
+        lock (StartLock)
+        {
+            if (!runtime.IsCurrent) return null;
+            var ambient = WorkContext.Current;
+            var context = ambient != null && ReferenceEquals(ambient.Runtime, runtime)
+                ? ambient
+                : new WorkContext(runtime, CS2_SimpleAdmin.GlobalServerId);
+            return Db?.TryEnqueue(operation, work, cancellationToken, context);
+        }
+    }
 
     public static string Describe() =>
         $"state={State}{(LastError != null ? $" lastError=\"{LastError}\"" : "")} serverId={CS2_SimpleAdmin.GlobalServerId?.ToString() ?? "none"} generation={_context.Generation}\n" +

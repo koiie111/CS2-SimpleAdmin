@@ -89,7 +89,15 @@ internal sealed class BoundedWorkQueue
         }
 
         // Context is captured here, on the caller's thread, at the moment the work is accepted
-        var job = new Job(operation, work, discard, explicitContext ?? _captureContext?.Invoke(), callerToken, Stopwatch.GetTimestamp());
+        var context = explicitContext ?? _captureContext?.Invoke();
+        if (context != null && !context.Runtime.IsCurrent)
+        {
+            // Producer of a lifetime that is over (nested job of an old worker): never accepted into the current queue
+            Interlocked.Increment(ref Rejected);
+            return false;
+        }
+
+        var job = new Job(operation, work, discard, context, callerToken, Stopwatch.GetTimestamp());
         Interlocked.Increment(ref _pending);
         if (!_channel.Writer.TryWrite(job))
         {
@@ -116,7 +124,7 @@ internal sealed class BoundedWorkQueue
     /// <param name="cancellationToken">Cancels this one job: if it is still queued it is skipped and the task
     /// is cancelled at once; if running, the token reaches the work (linked with the lifetime token).</param>
     public Task<T>? TryEnqueue<T>(string operation, Func<CancellationToken, Task<T>> work,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, WorkContext? context = null)
     {
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         var accepted = TryEnqueueCore(operation, async ct =>
@@ -139,17 +147,26 @@ internal sealed class BoundedWorkQueue
                 tcs.TrySetException(ex);
                 throw;
             }
-        }, () => tcs.TrySetCanceled(), cancellationToken);
+        }, () => tcs.TrySetCanceled(), cancellationToken, context);
 
         if (!accepted) return null;
-        // Caller cancellation completes the task immediately even though the job is still waiting in the queue;
-        // the worker then skips it when it gets there (see WorkerLoop).
-        if (cancellationToken.CanBeCanceled)
-        {
-            var registration = cancellationToken.Register(() => tcs.TrySetCanceled());
-            tcs.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(), registration,
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        }
+        // The awaiter is released by whichever happens first: the job's own outcome, the caller's token (even while the
+        // job is still queued; the worker then skips it) or the plugin lifetime. The last one matters for work that is
+        // already running and ignores its token (legacy SQL): unload must not leave its consumers hanging. The running
+        // job itself is not interrupted and keeps its worker/pending slot until it really returns, so the concurrency
+        // limit stays honest; its late result lands on an already completed task and is ignored.
+        var lifetimeRegistration = _lifetime.CanBeCanceled ? _lifetime.Register(static s => ((TaskCompletionSource<T>)s!).TrySetCanceled(), tcs) : default;
+        var callerRegistration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(static s => ((TaskCompletionSource<T>)s!).TrySetCanceled(), tcs)
+            : default;
+        if (lifetimeRegistration != default || callerRegistration != default)
+            tcs.Task.ContinueWith(static (_, state) =>
+                {
+                    var (a, b) = ((CancellationTokenRegistration, CancellationTokenRegistration))state!;
+                    a.Dispose();
+                    b.Dispose();
+                }, (lifetimeRegistration, callerRegistration), CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 
         return tcs.Task;
     }

@@ -225,19 +225,21 @@ public partial class CS2_SimpleAdmin
     /// says what happened: only <see cref="AdminReloadResult.Success"/> means the permissions were replaced; on
     /// <see cref="AdminReloadResult.Failed"/> the previous permissions stay in force.
     /// </summary>
-    internal Task<AdminReloadResult> ReloadAdminsAsync() =>
-        AdminReloads.RequestAsync(WorkContext.Current?.Runtime ?? Runtime.Context);
+    internal Task<AdminReloadResult> ReloadAdminsAsync() => ReloadAdminsAsync(WorkContext.Current?.Runtime ?? Runtime.Context);
+
+    /// <summary>Reload for an explicit runtime context (startup code passes the context it belongs to).</summary>
+    internal Task<AdminReloadResult> ReloadAdminsAsync(RuntimeContext context) => AdminReloads.RequestAsync(context);
 
     private async Task ReloadAdminsOnceAsync(RuntimeContext context)
     {
         var permissionManager = PermissionManager;
         var dataDirectory = Path.Combine(ModuleDirectory, "data");
-        var job = context.TryQueueDb<PermissionManager.PreparedAdminReload>("admins-reload", async _ =>
+        var job = context.TryQueueDb<PermissionManager.PreparedAdminReload>("admins-reload", async ct =>
         {
             // Everything is read first; the files are replaced only if all reads succeeded, so a failure at any
             // point leaves both the files and the applied permissions as they were.
             var prepared = await permissionManager.PrepareAdminReloadAsync().ConfigureAwait(false);
-            await permissionManager.CommitAdminFilesAsync(prepared, dataDirectory).ConfigureAwait(false);
+            await permissionManager.CommitAdminFilesAsync(prepared, dataDirectory, ct).ConfigureAwait(false);
             return prepared;
         });
         if (job == null)
