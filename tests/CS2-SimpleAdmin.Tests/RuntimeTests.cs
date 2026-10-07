@@ -234,6 +234,7 @@ public class InitializationTests
     [Fact]
     public async Task ConnectIsRetriedBoundedThenMigrates()
     {
+        Runtime.ResetForTests(true, new GameDispatcher(new FakeWorldUpdates().Schedule));
         Runtime.State = PluginState.Starting;
         var provider = new FlakyProvider(2, false);
         var ok = await CS2_SimpleAdmin.InitializeDatabaseAsync(provider, CancellationToken.None, [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
@@ -246,6 +247,7 @@ public class InitializationTests
     [Fact]
     public async Task UnreachableDatabaseEndsInFailedStateInsteadOfThrowing()
     {
+        Runtime.ResetForTests(true, new GameDispatcher(new FakeWorldUpdates().Schedule));
         Runtime.State = PluginState.Starting;
         var provider = new FlakyProvider(100, false);
         var ok = await CS2_SimpleAdmin.InitializeDatabaseAsync(provider, CancellationToken.None, [TimeSpan.Zero, TimeSpan.Zero]);
@@ -258,6 +260,7 @@ public class InitializationTests
     [Fact]
     public async Task FailedMigrationIsNotReportedAsReady()
     {
+        Runtime.ResetForTests(true, new GameDispatcher(new FakeWorldUpdates().Schedule));
         Runtime.State = PluginState.Starting;
         var ok = await CS2_SimpleAdmin.InitializeDatabaseAsync(new FlakyProvider(0, true), CancellationToken.None, []);
         Assert.False(ok);

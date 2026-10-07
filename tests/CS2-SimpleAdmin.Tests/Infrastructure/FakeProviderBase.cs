@@ -56,7 +56,10 @@ internal abstract class FakeProviderBase : IDatabaseProvider
     public virtual string GetExpireWarnsQuery(bool multiServer) => throw new NotSupportedException();
     public virtual string GetPenaltyHistoryQuery(bool multiServer) => throw new NotSupportedException();
     public virtual string GetPlayerPenaltyStatsQuery(bool multiServer) => throw new NotSupportedException();
-    public virtual string GetUpdateMutePassedBatchQuery(bool multiServer) => throw new NotSupportedException();
+    public virtual string GetOnlineCreditPlanQuery(bool multiServer) => throw new NotSupportedException();
+    public virtual string GetApplyOnlineCreditQuery(IReadOnlyList<Managers.OnlineCreditStep> steps) => throw new NotSupportedException();
+    public virtual string GetWarnsMenuPageQuery(bool multiServer) => throw new NotSupportedException();
+    public virtual string GetWarnsMenuCountQuery(bool multiServer) => throw new NotSupportedException();
     public virtual string GetExpiredOnlineMutesBatchQuery(bool multiServer) => throw new NotSupportedException();
     public virtual string GetPenaltyHistoryPageQuery(bool multiServer, string? type) => throw new NotSupportedException();
     public virtual string GetPenaltyHistoryCountQuery(bool multiServer, string? type) => throw new NotSupportedException();

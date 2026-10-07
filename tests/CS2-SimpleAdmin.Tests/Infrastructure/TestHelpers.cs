@@ -133,13 +133,39 @@ public static class TestDatabases
             }
         }).ToList());
 
+    /// <summary>Placeholder theory row used when no MySQL/MariaDB server is reachable: tests turn it into a visible skip.</summary>
+    public const string NoServer = "<no MySQL/MariaDB reachable>";
+
+    /// <summary>
+    /// CI sets SA_REQUIRE_MYSQL=1 for the dedicated MySQL/MariaDB job: there, an unreachable configured server is a
+    /// failure (see <see cref="RequiredServersAreReachable"/>), never a silent SQLite-only pass.
+    /// </summary>
+    public static bool MySqlRequired => Environment.GetEnvironmentVariable("SA_REQUIRE_MYSQL") == "1";
+
+    public static IEnumerable<string> Unreachable => Servers.Select(s => s.Name).Except(Reachable.Value.Select(s => s.Name));
+
     public static IEnumerable<object[]> All()
     {
         yield return ["SQLite"];
         foreach (var s in Reachable.Value) yield return [s.Name];
     }
 
-    public static IEnumerable<object[]> MySqlOnly() => Reachable.Value.Select(s => new object[] { s.Name });
+    /// <summary>One row per reachable server, or a single <see cref="NoServer"/> row (never an empty set).</summary>
+    public static IEnumerable<object[]> MySqlOnly() =>
+        Reachable.Value.Count == 0
+            ? [[NoServer]]
+            : Reachable.Value.Select(s => new object[] { s.Name });
+
+    /// <summary>Skips the calling test when the row is the "no server" placeholder.</summary>
+    public static void SkipIfNoServer(string engine) =>
+        Xunit.Skip.If(engine == NoServer, "No MySQL/MariaDB server reachable (set SA_TEST_MYSQL=\"name=host:port;…\"); SQLite-only run does NOT verify MySQL/MariaDB.");
+
+    /// <summary>Fails (not skips) when SA_REQUIRE_MYSQL=1 and a configured server cannot be reached.</summary>
+    public static void RequiredServersAreReachable()
+    {
+        var missing = Unreachable.ToList();
+        Assert.True(missing.Count == 0, "Required MySQL/MariaDB servers are not reachable: " + string.Join(", ", missing));
+    }
 
     public static async Task<TestDatabase> CreateAsync(string name, bool migrate = true)
     {

@@ -84,7 +84,7 @@ public class BanCacheSnapshotTests
     public void GetAccountsByIpUsesTheReverseIndex()
     {
         var s = Build([], [Ip(1, "9.9.9.9"), Ip(2, "9.9.9.9"), Ip(3, "8.8.8.8")]);
-        Assert.Equal([1UL, 2UL], s.GetAccountsByIp(IpHelper.IpToUint("9.9.9.9")).Select(a => a.SteamId).Order());
+        Assert.Equal([1UL, 2UL], s.GetAccountsByIp(IpHelper.IpToUint("9.9.9.9"), Now, 0).Select(a => a.SteamId).Order());
     }
 
     [Fact]
@@ -161,15 +161,19 @@ public class BanCacheSnapshotTests
             return true;
 
         var perAccount = history.GroupBy(h => (ulong)h.Steamid).ToDictionary(g => g.Key, g => g.ToList());
+        // R2: the OTHER account's own link to the IP counts only while it is newer than the cutoff, exactly as if the SQL
+        // expiry job (which deletes older sa_players_ips rows) had already run
+        bool Linked(List<IpHistoryRow> rows, uint address) =>
+            rows.Any(r => r.Address == address && (expireDays <= 0 || r.Used_at > cutoff));
         foreach (var (other, rows) in perAccount)
-            if (other != steamId && rows.Any(r => r.Address == ipUint) && ActiveSteam(other)) return true;
+            if (other != steamId && Linked(rows, ipUint) && ActiveSteam(other)) return true;
 
         if (!perAccount.TryGetValue(steamId, out var own)) return false;
         foreach (var record in own.GroupBy(r => r.Address).Select(g => g.MaxBy(r => r.Used_at)!))
         {
             if (expireDays > 0 && record.Used_at <= cutoff) continue;
             foreach (var (other, rows) in perAccount)
-                if (other != steamId && rows.Any(r => r.Address == record.Address) && ActiveSteam(other)) return true;
+                if (other != steamId && Linked(rows, record.Address) && ActiveSteam(other)) return true;
         }
 
         return false;

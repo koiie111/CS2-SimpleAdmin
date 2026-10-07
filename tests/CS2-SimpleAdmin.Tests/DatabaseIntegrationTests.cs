@@ -213,10 +213,10 @@ public class DatabaseIntegrationTests
                 db.Provider.GetRetrieveMutesQuery(false), new { PlayerSteamID = steam, ServerId = 1 }));
         }
 
-        CS2_SimpleAdmin.ServerId = 1;
+        CS2_SimpleAdmin.GlobalServerId = 1;
         var stats = await mutes.GetPlayerMutes(new CS2_SimpleAdminApi.PlayerInfo(1, 1,
             new CounterStrikeSharp.API.Modules.Entities.SteamID(steam), "p", null));
-        CS2_SimpleAdmin.ServerId = null;
+        CS2_SimpleAdmin.GlobalServerId = null;
         Assert.Equal((1, 2, 0), stats); // this server only (MultiServerMode=false)
     }
 
@@ -269,18 +269,20 @@ public class DatabaseIntegrationTests
                 await c.ExecuteAsync(db.Provider.GetAddMuteQuery(true), new
                 {
                     playerSteamid = steam, playerName = "p", adminSteamid = 0, adminName = "Console", muteReason = "r",
-                    duration = steam % 2 == 0 ? 1 : 10, ends = new DateTime(2030, 1, 1, 0, 0, 0), created = DateTime.Now, type = "MUTE", serverid = 1
+                    duration = steam % 2 == 0 ? 1 : 10, ends = new DateTime(2030, 1, 1, 0, 0, 0), created = DateTime.Now.AddHours(-1), type = "MUTE", serverid = 1
                 });
         }
 
         var updatesBefore = await ComUpdate(db);
         var mutes = new MuteManager(db.Provider);
-        var expired = await mutes.CheckOnlineModeMutesAsync(players.Select(p => (p, 1)).ToList(), true, 1, CancellationToken.None);
+        var windowEnd = DateTime.Now;
+        var credits = players.Select(p => new OnlineCredit(p, 1, OnlineCredit.TicksPerMinute, windowEnd.AddMinutes(-1), windowEnd)).ToList();
+        var expired = await mutes.CheckOnlineModeMutesAsync(credits, true, 1, CancellationToken.None);
         var updates = await ComUpdate(db) - updatesBefore;
 
         Assert.Equal(50, expired.Count); // duration 1 reached after one credited minute
         Assert.All(expired, e => Assert.Equal(new DateTime(2030, 1, 1, 0, 0, 0), e.Ends));
-        if (!db.IsSqlite) Assert.Equal(2, updates); // ceil(100/64) UPDATE statements; the old code issued 100 (+100 SELECTs)
+        if (!db.IsSqlite) Assert.Equal(2, updates); // ceil(100/64) compare-and-set statements; the original code issued 100 (+100 SELECTs)
 
         await using var check = await db.OpenAsync();
         Assert.Equal(100, await check.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM sa_mutes WHERE passed = 1"));
@@ -295,9 +297,17 @@ public class DatabaseIntegrationTests
         return long.Parse(row.Item2);
     }
 
-    [Theory, MemberData(nameof(MySqlEngines))]
+    [SkippableFact]
+    public void RequiredMySqlServersAreReachable()
+    {
+        Skip.IfNot(TestDatabases.MySqlRequired, "SA_REQUIRE_MYSQL is not set: SQLite-only run (does not verify MySQL/MariaDB)");
+        TestDatabases.RequiredServersAreReachable();
+    }
+
+    [SkippableTheory, MemberData(nameof(MySqlEngines))]
     public async Task CyrillicRoundTripsAndCollationSurvivesPoolReset(string engine)
     {
+        TestDatabases.SkipIfNoServer(engine);
         await using var db = await TestDatabases.CreateAsync(engine);
         var id = await InsertBan(db, 76561198000000051, null, name: "Вася Пупкин ёЁ");
         for (var i = 0; i < 3; i++) // the 2nd/3rd checkout reuse a pooled (reset) connection

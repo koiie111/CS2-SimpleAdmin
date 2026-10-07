@@ -12,6 +12,8 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Explicit, visible skips (e.g. no MySQL/MariaDB reachable) instead of an empty theory that fails as "No data found" -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
     <!-- The plugin references CSS compile-only; tests need the managed assembly at run time (no native calls are made) -->
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.369" />
   </ItemGroup>
