@@ -426,7 +426,9 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
 
     /// <summary>
     /// Starts a repeating timer to maintain speed and gravity modifications for players.
-    /// This ensures that speed/gravity changes persist even after respawns or round changes.
+    /// The engine can overwrite these pawn fields (e.g. velocity modifier after taking damage), so the values are
+    /// re-checked periodically, but written only when they differ: a matching value costs one field read instead
+    /// of a write per player every 0.12 s. Runs on the game thread; nothing here is moved to the background.
     /// </summary>
     private void StartSpeedGravityTimer()
     {
@@ -449,9 +451,10 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
                     if (player.IsValid && player.Connected == PlayerConnectedState.PlayerConnected)
                     {
                         var pawn = player.PlayerPawn?.Value;
-                        if (pawn != null && pawn.LifeState == (int)LifeState_t.LIFE_ALIVE)
+                        if (pawn != null && pawn.LifeState == (int)LifeState_t.LIFE_ALIVE &&
+                            Math.Abs(pawn.VelocityModifier - kvp.Value) > 0.0001f)
                         {
-                            player.SetSpeed(kvp.Value);
+                            pawn.VelocityModifier = kvp.Value;
                         }
                     }
                 }
@@ -466,9 +469,10 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
                     if (player.IsValid && player.Connected == PlayerConnectedState.PlayerConnected)
                     {
                         var pawn = player.PlayerPawn?.Value;
-                        if (pawn != null && pawn.LifeState == (int)LifeState_t.LIFE_ALIVE)
+                        if (pawn != null && pawn.LifeState == (int)LifeState_t.LIFE_ALIVE &&
+                            Math.Abs(pawn.ActualGravityScale - kvp.Value) > 0.0001f)
                         {
-                            player.SetGravity(kvp.Value);
+                            pawn.ActualGravityScale = kvp.Value;
                         }
                     }
                 }
