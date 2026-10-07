@@ -174,4 +174,43 @@ public class RegistryRetentionTests
         Assert.Equal(2, cat.MenuFactories.Count);
         Assert.Single(cat.MenuLocalizers);
     }
+
+    // ---- real BasePlugin.RemoveCommand ----
+
+    private sealed class FakeCommandManager : CounterStrikeSharp.API.Core.Commands.ICommandManager
+    {
+        public readonly List<CounterStrikeSharp.API.Core.Commands.CommandDefinition> Registered = [];
+        public void RegisterCommand(CounterStrikeSharp.API.Core.Commands.CommandDefinition definition) => Registered.Add(definition);
+        public void RemoveCommand(CounterStrikeSharp.API.Core.Commands.CommandDefinition definition) => Registered.Remove(definition);
+    }
+
+    [Fact]
+    public void UnregisterWithDifferentCaseRemovesTheHandlerFromThePluginToo()
+    {
+        const string registered = "css_test";
+        var baseFlags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        var basePlugin = typeof(CounterStrikeSharp.API.Core.BasePlugin);
+        var manager = new FakeCommandManager();
+        using var scope = new TestPlugin(TestConfig.Use(_ => { }), new OutageProvider());
+        var plugin = scope.Plugin;
+        basePlugin.GetField("<CommandManager>k__BackingField", baseFlags)!.SetValue(plugin, manager);
+        var pluginDefinitions = (List<CounterStrikeSharp.API.Core.Commands.CommandDefinition>)(
+            basePlugin.GetField("CommandDefinitions", baseFlags)!.GetValue(plugin)
+            ?? new List<CounterStrikeSharp.API.Core.Commands.CommandDefinition>());
+        basePlugin.GetField("CommandDefinitions", baseFlags)!.SetValue(plugin, pluginDefinitions);
+
+        var api = new ApiImpl();
+        var owner = new Owner();
+        api.RegisterCommand(registered, "d", owner.Handler);
+        plugin.AddCommand(registered, "d", owner.Handler); // what RegisterCommands.Register does for custom commands
+        Assert.Single(pluginDefinitions);
+        Assert.Single(manager.Registered);
+
+        api.UnRegisterCommand("CSS_TEST");
+        api.UnRegisterCommand(registered); // second removal is a no-op
+
+        Assert.False(CustomCommandRegistry.Definitions.ContainsKey(registered));
+        Assert.Empty(pluginDefinitions);
+        Assert.Empty(manager.Registered);
+    }
 }

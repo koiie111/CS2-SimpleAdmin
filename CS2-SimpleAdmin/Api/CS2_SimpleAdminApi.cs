@@ -186,7 +186,7 @@ public class CS2_SimpleAdminApi : ICS2_SimpleAdminApi
 
         foreach (var definition in definitions)
         {
-            CommandRemover(commandName, definition.Callback);
+            CommandRemover(definition.Name, definition.Callback);
         }
     }
 
