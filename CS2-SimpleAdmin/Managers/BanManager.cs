@@ -36,7 +36,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
                 playerName = player.Name,
                 playerIp = CS2_SimpleAdmin.Instance.Config.OtherSettings.BanType == 1 ? player.IpAddress : null,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 banReason = reason,
                 duration = time,
                 ends = futureTime,
@@ -76,7 +76,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
             {
                 playerSteamid = playerSteamId,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 banReason = reason,
                 duration = time,
                 ends = futureTime,
@@ -118,7 +118,7 @@ internal class BanManager(IDatabaseProvider? databaseProvider)
             {
                 playerIp,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 banReason = reason,
                 duration = time,
                 ends = futureTime,

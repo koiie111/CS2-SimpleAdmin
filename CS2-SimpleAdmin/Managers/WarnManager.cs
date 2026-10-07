@@ -32,7 +32,7 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
                 playerSteamid = player.SteamId.SteamId64,
                 playerName = player.Name,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 warnReason = reason,
                 duration = time,
                 ends = futureTime,
@@ -72,7 +72,7 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
             {
                 playerSteamid = playerSteamId,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 warnReason = reason,
                 duration = time,
                 ends = futureTime,

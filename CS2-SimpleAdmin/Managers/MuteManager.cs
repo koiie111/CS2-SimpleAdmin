@@ -40,7 +40,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
                 playerSteamid = player.SteamId.SteamId64,
                 playerName = player.Name,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 muteReason = reason,
                 duration = time,
                 ends = futureTime,
@@ -90,7 +90,7 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             {
                 playerSteamid = playerSteamId,
                 adminSteamid = issuer?.SteamId.SteamId64 ?? 0,
-                adminName = issuer?.Name ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console",
+                adminName = issuer?.Name ?? "Console", // fork: literal "Console" in DB, the site matches it
                 muteReason = reason,
                 duration = time,
                 ends = futureTime,
