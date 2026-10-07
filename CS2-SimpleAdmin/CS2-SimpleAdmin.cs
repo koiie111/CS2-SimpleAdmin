@@ -103,9 +103,9 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
 
     public void OnConfigParsed(CS2_SimpleAdminConfig config)
     {
+        _logger = Logger; // fork: before UpdateConfig so its warnings are logged
         Helper.UpdateConfig(config);
 
-        _logger = Logger;
         Config = config;
 
         bool missing = false;

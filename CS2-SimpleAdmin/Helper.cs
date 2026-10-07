@@ -879,7 +879,22 @@ internal static class Helper
             return;
 
         var json = File.ReadAllText(CfgPath);
-        var node = JsonNode.Parse(json);
+        JsonNode? node;
+        try
+        {
+            // fork: CounterStrikeSharp accepts // comments and trailing commas in plugin configs, so the
+            // version bump must too; a parse error here used to abort loading the whole plugin.
+            node = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            });
+        }
+        catch (JsonException ex)
+        {
+            CS2_SimpleAdmin._logger?.LogWarning($"Could not bump Version in {CfgPath}: {ex.Message}");
+            return;
+        }
 
         if (node != null)
         {
