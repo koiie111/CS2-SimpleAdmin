@@ -62,7 +62,7 @@ public static class PlayerPenaltyManager
     /// <summary>
     /// Next position in the accept order of penalty operations (commands, connect loads). Unique and increasing; taken
     /// on the game thread when an operation is accepted, so it orders operations exactly like the per-player SQL order
-    /// (see <see cref="Infrastructure.KeyedSequencer"/>).
+    /// (see <see cref="Infrastructure.BoundedWorkQueue"/>).
     /// </summary>
     internal static long NextRevision() => Interlocked.Increment(ref _revision);
 

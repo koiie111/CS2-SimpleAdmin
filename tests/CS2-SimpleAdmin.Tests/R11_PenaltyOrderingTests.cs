@@ -545,7 +545,7 @@ public class R11_PenaltyOrderingTests
         gate.SetResult();
         await TestWorld.WaitUntil(() => log.Contains("b:start"));
         lock (log) Assert.True(log.IndexOf("a:end") < log.IndexOf("b:start"));
-        await TestWorld.WaitUntil(() => Runtime.Sequencer!.ActiveKeys == 0);
+        await TestWorld.WaitUntil(() => Runtime.Db!.ActiveKeys == 0);
     }
 
     [Fact]
@@ -557,7 +557,7 @@ public class R11_PenaltyOrderingTests
         Assert.True(Runtime.TryQueueDbOrdered("fails", _ => throw new InvalidOperationException("boom"), ctx, 7));
         Assert.True(Runtime.TryQueueDbOrdered("next", _ => { ran.SetResult(); return Task.CompletedTask; }, ctx, 7));
         await ran.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await TestWorld.WaitUntil(() => Runtime.Sequencer!.ActiveKeys == 0);
+        await TestWorld.WaitUntil(() => Runtime.Db!.ActiveKeys == 0);
     }
 
     [Fact]
@@ -571,7 +571,7 @@ public class R11_PenaltyOrderingTests
         await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(Runtime.TryQueueDb("filler", _ => Task.CompletedTask)); // the single slot
         Assert.False(Runtime.TryQueueDbOrdered("refused", _ => Task.CompletedTask, ctx, 9));
-        Assert.Equal(0, Runtime.Sequencer!.ActiveKeys); // the refused job holds no place
+        Assert.Equal(0, Runtime.Db!.ActiveKeys); // the refused job holds no place
 
         gate.SetResult();
         await TestWorld.WaitUntil(() => Runtime.Db!.Pending == 0);
@@ -591,7 +591,7 @@ public class R11_PenaltyOrderingTests
         await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
         using var next = new TestWorld(sqlite: false); // a new lifetime and queues (the old job is still stuck)
-        Assert.Equal(0, Runtime.Sequencer!.ActiveKeys);
+        Assert.Equal(0, Runtime.Db!.ActiveKeys);
         var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Assert.True(Runtime.TryQueueDbOrdered("fresh", _ => { ran.SetResult(); return Task.CompletedTask; },
             new WorkContext(Runtime.Context, 1), 5));

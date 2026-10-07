@@ -336,6 +336,99 @@ foreach (var n in new[] { 10, 100, 1000, 5000 })
 
 Line();
 
+// ---------------------------------------------------------------- L: per-key scheduling under backpressure
+{
+    Line("## L. Per-player scheduling (BoundedWorkQueue lanes) under a hot key");
+    Line();
+    Line("Model: capacity 512, 4 workers (MySQL). One \"hot\" SteamID whose first job is held for a fixed stall (a slow SQL call), then `successors` more jobs of that SteamID, then many jobs of other SteamIDs (each: a short async step, ~50 µs of CPU). Other SteamIDs submit one job every 200 µs while the hot head is stalled; latency = accept → job finished for the accepted ones, refusals are counted separately. `old model` = the previous design (ticket awaited inside the job, so waiting successors hold worker slots), rebuilt here on the unkeyed queue; `lanes` = the current queue. Synthetic: no SQL, no CS2; it shows queueing behaviour, not frame time.");
+    Line();
+    Line("| scenario | model | other-key jobs offered | refused | p50 | p99 | max | peak Queued/Capacity | peak Running | B/job (whole process) |");
+    Line("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+
+    static void Spin(int micro)
+    {
+        var end = Stopwatch.GetTimestamp() + micro * Stopwatch.Frequency / 1_000_000;
+        while (Stopwatch.GetTimestamp() < end) { }
+    }
+
+    static async Task<(double[] Latencies, int Rejected, int PeakQueued, int PeakRunning, double BytesPerJob)> Scenario(bool lanes, int successors, int others, int stallMs, int distinctKeys)
+    {
+        using var cts = new CancellationTokenSource();
+        var q = new BoundedWorkQueue("bench", 512, 4, cts.Token);
+        const ulong hot = 76561198000000001;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tails = new Dictionary<ulong, Task>(); // old model only: the previous job of a key, in accept order
+
+        bool Submit(ulong key, Func<Task> body)
+        {
+            if (lanes) return q.TryEnqueue("b", _ => body(), null, key);
+            Task? prev; lock (tails) tails.TryGetValue(key, out prev);
+            var mine = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var ok = q.TryEnqueue("b", async _ =>
+            {
+                try { if (prev != null) await prev; await body(); } finally { mine.TrySetResult(); }
+            });
+            if (ok) lock (tails) tails[key] = mine.Task;
+            return ok;
+        }
+
+        Submit(hot, async () => { started.SetResult(); await gate.Task; });
+        await started.Task;
+        for (var i = 0; i < successors; i++) Submit(hot, () => Task.CompletedTask);
+
+        // Other players' jobs arrive at a fixed pace (one per 200 µs) while the hot key's head is stalled
+        var latencies = new double[others];
+        var finished = new bool[others];
+        var accepted = 0; var rejected = 0; var done = 0;
+        var peakQ = 0; var peakR = 0;
+        var before = GC.GetTotalAllocatedBytes(true);
+        var origin = Stopwatch.GetTimestamp();
+        var releaser = Task.Run(async () => { await Task.Delay(stallMs); gate.SetResult(); });
+        for (var i = 0; i < others; i++)
+        {
+            while (Stopwatch.GetElapsedTime(origin).TotalMicroseconds < i * 200.0) Thread.SpinWait(20);
+            var index = i;
+            var t0 = Stopwatch.GetTimestamp();
+            var key = hot + 1 + (ulong)(i % distinctKeys);
+            if (Submit(key, async () =>
+                {
+                    Spin(50);
+                    await Task.Yield();
+                    latencies[index] = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                    finished[index] = true;
+                    Interlocked.Increment(ref done);
+                }))
+                accepted++;
+            else
+                rejected++;
+            peakQ = Math.Max(peakQ, q.Queued); peakR = Math.Max(peakR, q.Running);
+        }
+
+        while (Volatile.Read(ref done) < accepted) await Task.Delay(1);
+        var bytes = (GC.GetTotalAllocatedBytes(true) - before) / (double)(others + successors);
+        await releaser;
+        while (q.Pending > 0) await Task.Delay(1);
+        cts.Cancel();
+        var result = latencies.Where((_, i) => finished[i]).ToArray();
+        Array.Sort(result);
+        return (result, rejected, peakQ, peakR, bytes);
+    }
+
+    foreach (var (name, successors, stall, keysCount) in new[] { ("hot key, 3 successors, 200 ms stall", 3, 200, 400), ("hot key, 300 successors, 200 ms stall", 300, 200, 400), ("no stall, 400 distinct keys", 0, 0, 400) })
+    foreach (var lanes in new[] { false, true })
+    {
+        var others = quick ? 1500 : 4000;
+        var r = await Scenario(lanes, successors, others, stall, keysCount);
+        string P(double q) => r.Latencies.Length == 0 ? "-" : $"{r.Latencies[(int)(q * (r.Latencies.Length - 1))]:F2} ms";
+        Line($"| {name} | {(lanes ? "lanes" : "old model")} | {others:N0} | {r.Rejected:N0} | {P(0.5)} | {P(0.99)} | {(r.Latencies.Length == 0 ? "-" : $"{r.Latencies[^1]:F2} ms")} | {r.PeakQueued}/512 | {r.PeakRunning} | {r.BytesPerJob:F0} |");
+    }
+
+    Line();
+    Line("Peak Queued is sampled by the producer after each accepted job; in the lanes model it includes jobs parked behind the hot key, so `Queued ≤ Capacity` shows that waiting jobs are inside the bound. `old model` shows peak Running = 4 for the stalled hot key: every worker is occupied by a waiting successor.");
+    Line();
+}
+
 var outPath = args.FirstOrDefault(a => a.EndsWith(".md"));
 if (outPath != null) File.WriteAllText(outPath, sb.ToString());
 return;

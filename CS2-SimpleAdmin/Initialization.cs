@@ -157,7 +157,7 @@ public partial class CS2_SimpleAdmin
     /// </summary>
     /// <param name="orderKey">
     /// SteamID64 of the player the write is about. Writes with the same key run in the order in which they were
-    /// accepted, even on a multi-worker queue (see <see cref="KeyedSequencer"/>); null = no ordering requirement.
+    /// accepted, even on a multi-worker queue (see <see cref="Infrastructure.BoundedWorkQueue"/>); null = no ordering requirement.
     /// </param>
     internal static bool TryQueuePenaltyWork(CCSPlayerController? caller, CommandInfo? command, string operation,
         Func<CancellationToken, Task> work, OperationScope scope = OperationScope.Server, ulong? orderKey = null) =>

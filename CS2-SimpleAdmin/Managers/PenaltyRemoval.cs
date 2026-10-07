@@ -35,7 +35,7 @@ internal enum UnmuteOutcome
 /// </para>
 /// <list type="number">
 /// <item>their SQL runs in exactly that order, on one worker (SQLite) and on several (MySQL) alike, see
-/// <see cref="KeyedSequencer"/>; so an unmute closes the penalties accepted before it and none accepted after it;</item>
+/// <see cref="BoundedWorkQueue"/>; so an unmute closes the penalties accepted before it and none accepted after it;</item>
 /// <item>every in-memory penalty carries the accept position of the operation that created it
 /// (<see cref="PlayerPenaltyManager.Entry.Revision"/>); the removal remembers its own position and later removes only
 /// entries up to it. A penalty issued while the removal was still waiting for its SQL or for the game thread survives;
