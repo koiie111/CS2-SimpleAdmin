@@ -3,8 +3,14 @@ using Microsoft.Extensions.Logging;
 
 namespace CS2_SimpleAdmin.Database;
 
-public class Migration(string migrationsPath)
+public class Migration(string migrationsPath, Func<Task<DbConnection>>? connectionFactory = null, bool useNamedLock = false)
 {
+    /// <summary>MySQL named lock that serialises migrations of several servers sharing one database.</summary>
+    internal const string LockName = "cs2_simpleadmin_migrations";
+
+    /// <summary>Delay before the single retry of a failed script (another server may be applying it right now).</summary>
+    internal static TimeSpan RetryDelay = TimeSpan.FromSeconds(3);
+
     /// <summary>
     /// Executes all migration scripts found in the configured migrations path that have not been applied yet.
     /// Creates a migration tracking table if it does not exist.
@@ -18,7 +24,9 @@ public class Migration(string migrationsPath)
         var files = Directory.GetFiles(migrationsPath, "*.sql").OrderBy(f => f).ToList();
         if (files.Count == 0) return;
 
-        await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
+        await using var connection = connectionFactory != null
+            ? await connectionFactory()
+            : await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
         await using (var cmd = connection.CreateCommand())
         {
             if (migrationsPath.Contains("sqlite", StringComparison.CurrentCultureIgnoreCase))
@@ -44,6 +52,34 @@ public class Migration(string migrationsPath)
             await cmd.ExecuteNonQueryAsync();
         }
 
+        // Upstream scripts are not all re-runnable (e.g. 005 ADD COLUMN). Without this lock two servers starting on the
+        // same database could both apply the same script and one of them fail. The version is read after the lock,
+        // so the second server skips what the first one applied. Released explicitly and when the session ends.
+        if (useNamedLock)
+        {
+            await using var lockCmd = connection.CreateCommand();
+            lockCmd.CommandText = $"SELECT GET_LOCK('{LockName}', 600)";
+            var acquired = Convert.ToInt64(await lockCmd.ExecuteScalarAsync() ?? 0L);
+            if (acquired != 1) throw new MigrationFailedException("(lock)", new TimeoutException("could not acquire the migration lock"));
+        }
+
+        try
+        {
+            await ApplyPendingAsync(connection, files);
+        }
+        finally
+        {
+            if (useNamedLock)
+            {
+                await using var unlockCmd = connection.CreateCommand();
+                unlockCmd.CommandText = $"SELECT RELEASE_LOCK('{LockName}')";
+                try { await unlockCmd.ExecuteScalarAsync(); } catch { /* session end releases it anyway */ }
+            }
+        }
+    }
+
+    private async Task ApplyPendingAsync(DbConnection connection, List<string> files)
+    {
         var lastAppliedVersion = await GetLastAppliedVersionAsync(connection);
 
         foreach (var file in files)
@@ -52,24 +88,34 @@ public class Migration(string migrationsPath)
             if (string.Compare(version, lastAppliedVersion, StringComparison.OrdinalIgnoreCase) <= 0)
                 continue;
 
-            try
+            var sqlScript = await File.ReadAllTextAsync(file);
+            for (var attempt = 1; ; attempt++)
             {
-                var sqlScript = await File.ReadAllTextAsync(file);
-
-                await using (var cmdMigration = connection.CreateCommand())
+                try
                 {
-                    cmdMigration.CommandText = sqlScript;
-                    await cmdMigration.ExecuteNonQueryAsync();
+                    await using (var cmdMigration = connection.CreateCommand())
+                    {
+                        cmdMigration.CommandText = sqlScript;
+                        await cmdMigration.ExecuteNonQueryAsync();
+                    }
+
+                    await UpdateLastAppliedVersionAsync(connection, version);
+
+                    CS2_SimpleAdmin._logger?.LogInformation($"Migration \"{version}\" successfully applied.");
+                    break;
                 }
-
-                await UpdateLastAppliedVersionAsync(connection, version);
-
-                CS2_SimpleAdmin._logger?.LogInformation($"Migration \"{version}\" successfully applied.");
-            }
-            catch (Exception ex)
-            {
-                CS2_SimpleAdmin._logger?.LogError(ex, $"Error applying migration \"{version}\".");
-                throw new MigrationFailedException(version, ex);
+                catch (Exception ex) when (attempt == 1)
+                {
+                    // Two servers starting together can race on the same script (e.g. "duplicate key name" between the
+                    // existence check and ALTER). The fork's scripts are idempotent, so one retry settles it.
+                    CS2_SimpleAdmin._logger?.LogWarning($"Migration \"{version}\" failed ({ex.Message}), retrying once.");
+                    await Task.Delay(RetryDelay);
+                }
+                catch (Exception ex)
+                {
+                    CS2_SimpleAdmin._logger?.LogError(ex, $"Error applying migration \"{version}\".");
+                    throw new MigrationFailedException(version, ex);
+                }
             }
         }
     }

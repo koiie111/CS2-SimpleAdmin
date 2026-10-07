@@ -77,7 +77,10 @@ public sealed class TestDatabase : IAsyncDisposable
     {
         CS2_SimpleAdmin.DatabaseProvider = Provider;
         var dir = Path.Combine(AppContext.BaseDirectory, "Migrations", IsSqlite ? "Sqlite" : "Mysql");
-        await new Migration(dir).ExecuteMigrationsAsync();
+        if (Provider is MySqlDatabaseProvider mysql)
+            await mysql.RunMigrationsAsync(dir); // same path as the plugin (user variables enabled for migrations)
+        else
+            await new Migration(dir).ExecuteMigrationsAsync();
     }
 
     public async ValueTask DisposeAsync()

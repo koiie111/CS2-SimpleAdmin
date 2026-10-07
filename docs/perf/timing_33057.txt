@@ -1,0 +1,7 @@
+query                                    without idx p50/max ms    with idx p50/max ms
+refresh delta (bans changed in 90s)           55.61 /    57.79         0.10 /     0.22
+active checksum                               22.20 /    22.48         1.12 /     1.31
+expire bans (as SELECT)                       24.41 /    24.85         6.35 /    10.06
+expire mutes (as SELECT)                      24.79 /    32.38         5.13 /    16.67
+expire warns (as SELECT)                      12.42 /    12.88         2.26 /     6.19
+player stats (connect)                        48.53 /  1000.00         5.39 /  1000.00

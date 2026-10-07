@@ -41,11 +41,25 @@ public class MySqlDatabaseProvider(string connectionString) : IDatabaseProvider
         }
     }
     
-    public Task DatabaseMigrationAsync()
-    {
-        var migration = new Migration(CS2_SimpleAdmin.Instance.ModuleDirectory + "/Database/Migrations/Mysql");
-        return migration.ExecuteMigrationsAsync();
-    }
+    public Task DatabaseMigrationAsync() =>
+        RunMigrationsAsync(CS2_SimpleAdmin.Instance.ModuleDirectory + "/Database/Migrations/Mysql");
+
+    /// <summary>
+    /// Migrations run on their own connection with AllowUserVariables, which idempotent scripts need for
+    /// "SET @sql = IF(index exists, …); PREPARE …" (MySQL 5.7 has no CREATE INDEX IF NOT EXISTS). Normal queries
+    /// keep the default, where an unknown @parameter is an error rather than a silent user variable.
+    /// </summary>
+    internal Task RunMigrationsAsync(string path) =>
+        new Migration(path, async () =>
+        {
+            var builder = new MySqlConnectionStringBuilder(connectionString) { AllowUserVariables = true, DefaultCommandTimeout = 600 };
+            var connection = new MySqlConnection(builder.ConnectionString);
+            await connection.OpenAsync();
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci';";
+            await cmd.ExecuteNonQueryAsync();
+            return connection;
+        }, useNamedLock: true).ExecuteMigrationsAsync();
 
     public string GetBanSelectQuery(bool multiServer)
     {
