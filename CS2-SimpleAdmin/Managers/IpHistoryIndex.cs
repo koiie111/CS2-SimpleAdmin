@@ -101,6 +101,9 @@ internal sealed class IpHistoryIndex
         return ids.ToArray();
     }
 
+    /// <summary>Modulus applied to SteamID64 in the checksum; must equal the literal in <see cref="CacheManager.IpChecksumSql"/>.</summary>
+    internal const long SteamModulus = 2147483647;
+
     /// <summary>
     /// Count and sums over the records newer than <paramref name="cutoff"/> (the same triple SQL computes with
     /// COUNT/SUM over sa_players_ips), to detect rows deleted behind the cache's back. O(records), allocation-free;
@@ -108,6 +111,8 @@ internal sealed class IpHistoryIndex
     /// </summary>
     public (long Count, long SteamSum, long AddressSum) Checksum(DateTime cutoff)
     {
+        // Terms are < 2^32 (steam % (2^31-1), UInt32 address), so the sums cannot overflow below 2^31-1 rows; the
+        // explicit checked() turns a violated bound into an exception instead of a silent wrap.
         long count = 0, steamSum = 0, addressSum = 0;
         foreach (var (steam, records) in _baseIps)
         {
@@ -124,8 +129,8 @@ internal sealed class IpHistoryIndex
             {
                 if (r.UsedAt <= cutoff) continue;
                 count++;
-                steamSum += (long)steam;
-                addressSum += r.Ip;
+                steamSum = checked(steamSum + (long)(steam % (ulong)SteamModulus));
+                addressSum = checked(addressSum + r.Ip);
             }
         }
     }

@@ -97,9 +97,15 @@ internal class CacheManager : IDisposable
         "WHERE used_at > @t OR (used_at = @t AND (steamid > @s OR (steamid = @s AND address > @a))) " +
         "ORDER BY used_at, steamid, address LIMIT @limit";
 
-    /// <summary>COUNT/SUM over the IP history newer than @cutoff: compared with <see cref="IpHistoryIndex.Checksum"/>.</summary>
+    /// <summary>
+    /// COUNT/SUM over the IP history newer than @cutoff: compared with <see cref="IpHistoryIndex.Checksum"/>.
+    /// Both sides use the same bounded arithmetic: every SteamID64 term is reduced modulo
+    /// <see cref="IpHistoryIndex.SteamModulus"/> (2^31-1) before it is summed, so each term is below 2^32 (addresses
+    /// are UInt32) and a sum of up to 2^31-1 rows stays below Int64.MaxValue on SQLite, MySQL and MariaDB alike
+    /// (a raw SUM(steamid) overflows at 121 real SteamID64 rows). Exact, no floating point.
+    /// </summary>
     internal const string IpChecksumSql =
-        "SELECT COUNT(*), COALESCE(SUM(steamid), 0), COALESCE(SUM(address), 0) FROM sa_players_ips WHERE used_at > @cutoff";
+        "SELECT COUNT(*), COALESCE(SUM(steamid % 2147483647), 0), COALESCE(SUM(address), 0) FROM sa_players_ips WHERE used_at > @cutoff";
 
     private static async Task<(long Count, long IdSum)> ReadChecksumAsync(DbConnection connection, bool multiServer,
         int? serverId, CancellationToken ct)
