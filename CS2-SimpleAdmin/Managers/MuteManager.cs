@@ -302,14 +302,17 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
     /// <param name="adminSteamId">SteamID64 of the admin performing the unmute.</param>
     /// <param name="reason">Reason for unmuting the player(s).</param>
     /// <param name="type">Mute type to remove: 0 = GAG, 1 = MUTE, 2 = SILENCE.</param>
-    /// <returns>Task representing the asynchronous operation.</returns>
-    public async Task UnmutePlayer(string playerPattern, string adminSteamId, string reason, int type = 0)
+    /// <returns>
+    /// <see cref="UnmuteOutcome.Removed"/> / <see cref="UnmuteOutcome.NothingActive"/> when the statements ran,
+    /// <see cref="UnmuteOutcome.Failed"/> when the database is unavailable or an exception occurred (logged).
+    /// </returns>
+    public async Task<UnmuteOutcome> UnmutePlayer(string playerPattern, string adminSteamId, string reason, int type = 0)
     {
-        if (databaseProvider == null) return;
+        if (databaseProvider == null) return UnmuteOutcome.Failed;
 
         if (playerPattern.Length <= 1)
         {
-            return;
+            return UnmuteOutcome.NothingActive;
         }
 
         try
@@ -324,11 +327,12 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
 
             var sqlRetrieveMutes =
                 databaseProvider.GetRetrieveMutesQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-            var mutes = await connection.QueryAsync(sqlRetrieveMutes, new { pattern = playerPattern, muteType, serverid = CS2_SimpleAdmin.ServerId });
-
-            var mutesList = mutes as dynamic[] ?? mutes.ToArray();
+            // Typed on purpose: `dynamic` rows made `int muteId = mute.id` throw on SQLite (INTEGER arrives as Int64), and
+            // the swallowed exception meant the penalty was never removed there
+            var mutesList = (await connection.QueryAsync<long>(sqlRetrieveMutes,
+                new { pattern = playerPattern, muteType, serverid = CS2_SimpleAdmin.ServerId })).ToArray();
             if (mutesList.Length == 0)
-                return;
+                return UnmuteOutcome.NothingActive;
 
             var sqlAdmin = databaseProvider.GetUnmuteAdminIdQuery();
             var sqlInsertUnmute = databaseProvider.GetInsertUnmuteQuery(string.IsNullOrEmpty(reason));
@@ -336,20 +340,22 @@ internal class MuteManager(IDatabaseProvider? databaseProvider)
             var sqlAdminId = await connection.ExecuteScalarAsync<int?>(sqlAdmin, new { adminSteamId });
             var adminId = sqlAdminId ?? 0;
 
-            foreach (var mute in mutesList)
+            foreach (var muteId in mutesList)
             {
-                int muteId = mute.id;
 
-                int? unmuteId =
-                    await connection.ExecuteScalarAsync<int>(sqlInsertUnmute, new { muteId, adminId, reason });
+                var unmuteId =
+                    await connection.ExecuteScalarAsync<long>(sqlInsertUnmute, new { muteId, adminId, reason });
 
                 var sqlUpdateMute = databaseProvider.GetUpdateMuteStatusQuery();
                 await connection.ExecuteAsync(sqlUpdateMute, new { unmuteId, muteId });
             }
+
+            return UnmuteOutcome.Removed;
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex);
+            Infrastructure.RateLimitedLog.Error("unmute.sql", ex, "Unable to remove the penalty");
+            return UnmuteOutcome.Failed;
         }
     }
 

@@ -273,6 +273,10 @@ public partial class CS2_SimpleAdmin
 
         Helper.LogCommand(caller, command);
 
+        // Nothing in the game is touched here: the in-memory penalty, voice flags and counters are removed by
+        // PenaltyRemoval only after the database work was accepted AND succeeded (see PenaltyRemoval).
+        var callerRef = CallerRef.Capture(caller);
+
         // Check if pattern is a valid SteamID64
         if (Helper.ValidateSteamId(pattern, out var steamId) && steamId != null)
         {
@@ -280,14 +284,9 @@ public partial class CS2_SimpleAdmin
 
             if (player != null && player.IsValid)
             {
-                PlayerPenaltyManager.RemovePenaltiesByType(player.Slot, PenaltyType.Gag);
-
                 // SteamID is read here (game thread); the worker only gets the string
-                var targetSteamId = player.SteamID.ToString();
-                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-                {
-                    await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason);
-                })) return;
+                var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 0, target, false)) return;
 
                 command.ReplyToCommand($"Ungaged player {player.PlayerName}.");
                 return;
@@ -300,26 +299,14 @@ public partial class CS2_SimpleAdmin
 
         if (namePlayer != null && namePlayer.IsValid)
         {
-            PlayerPenaltyManager.RemovePenaltiesByType(namePlayer.Slot, PenaltyType.Gag);
-
-            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalGags > 0)
-                GetPlayerInfo(namePlayer).TotalGags--;
-
-            // SteamID is read here (game thread); the worker only gets the string
-            var targetSteamId = namePlayer.SteamID.ToString();
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason);
-            })) return;
+            var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 0, target, true)) return;
 
             command.ReplyToCommand($"Ungaged player {namePlayer.PlayerName}.");
         }
         else
         {
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(pattern, callerSteamId, reason);
-            })) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 0, null, false)) return;
 
             command.ReplyToCommand($"Ungaged offline player with pattern {pattern}.");
         }
@@ -591,6 +578,10 @@ public partial class CS2_SimpleAdmin
 
         Helper.LogCommand(caller, command);
 
+        // Nothing in the game is touched here: the in-memory penalty, voice flags and counters are removed by
+        // PenaltyRemoval only after the database work was accepted AND succeeded (see PenaltyRemoval).
+        var callerRef = CallerRef.Capture(caller);
+
         // Check if pattern is a valid SteamID64
         if (Helper.ValidateSteamId(pattern, out var steamId) && steamId != null)
         {
@@ -598,15 +589,9 @@ public partial class CS2_SimpleAdmin
 
             if (player != null && player.IsValid)
             {
-                PlayerPenaltyManager.RemovePenaltiesByType(player.Slot, PenaltyType.Mute);
-                player.VoiceFlags = VoiceFlags.Normal;
-
                 // SteamID is read here (game thread); the worker only gets the string
-                var targetSteamId = player.SteamID.ToString();
-                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-                {
-                    await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason, 1);
-                })) return;
+                var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 1, target, false)) return;
 
                 command.ReplyToCommand($"Unmuted player {player.PlayerName}.");
                 return;
@@ -619,27 +604,14 @@ public partial class CS2_SimpleAdmin
 
         if (namePlayer != null && namePlayer.IsValid)
         {
-            PlayerPenaltyManager.RemovePenaltiesByType(namePlayer.Slot, PenaltyType.Mute);
-            namePlayer.VoiceFlags = VoiceFlags.Normal;
-
-            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalMutes > 0)
-                GetPlayerInfo(namePlayer).TotalMutes--;
-
-            // SteamID is read here (game thread); the worker only gets the string
-            var targetSteamId = namePlayer.SteamID.ToString();
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason, 1);
-            })) return;
+            var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 1, target, true)) return;
 
             command.ReplyToCommand($"Unmuted player {namePlayer.PlayerName}.");
         }
         else
         {
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(pattern, callerSteamId, reason, 1);
-            })) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 1, null, false)) return;
 
             command.ReplyToCommand($"Unmuted offline player with pattern {pattern}.");
         }
@@ -911,6 +883,10 @@ public partial class CS2_SimpleAdmin
         
         Helper.LogCommand(caller, command);
 
+        // Nothing in the game is touched here: the in-memory penalty, voice flags and counters are removed by
+        // PenaltyRemoval only after the database work was accepted AND succeeded (see PenaltyRemoval).
+        var callerRef = CallerRef.Capture(caller);
+
         // Check if pattern is a valid SteamID64
         if (Helper.ValidateSteamId(pattern, out var steamId) && steamId != null)
         {
@@ -918,17 +894,9 @@ public partial class CS2_SimpleAdmin
 
             if (player != null && player.IsValid)
             {
-                PlayerPenaltyManager.RemovePenaltiesByType(player.Slot, PenaltyType.Silence);
-
-                // Reset voice flags to normal
-                player.VoiceFlags = VoiceFlags.Normal;
-
                 // SteamID is read here (game thread); the worker only gets the string
-                var targetSteamId = player.SteamID.ToString();
-                if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-                {
-                    await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason, 2); // Unmute by type 2 (silence)
-                })) return;
+                var target = new PenaltyRemoval.Target(player.Slot, player.UserId ?? -1, player.SteamID);
+                if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, player.SteamID.ToString(), reason, 2, target, false)) return;
 
                 command.ReplyToCommand($"Unsilenced player {player.PlayerName}.");
                 return;
@@ -941,29 +909,14 @@ public partial class CS2_SimpleAdmin
 
         if (namePlayer != null && namePlayer.IsValid)
         {
-            PlayerPenaltyManager.RemovePenaltiesByType(namePlayer.Slot, PenaltyType.Silence);
-
-            // Reset voice flags to normal
-            namePlayer.VoiceFlags = VoiceFlags.Normal;
-
-            if (namePlayer.UserId.HasValue && GetPlayerInfo(namePlayer).TotalSilences > 0)
-                GetPlayerInfo(namePlayer).TotalSilences--;
-
-            // SteamID is read here (game thread); the worker only gets the string
-            var targetSteamId = namePlayer.SteamID.ToString();
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(targetSteamId, callerSteamId, reason, 2); // Unmute by type 2 (silence)
-            })) return;
+            var target = new PenaltyRemoval.Target(namePlayer.Slot, namePlayer.UserId ?? -1, namePlayer.SteamID);
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, namePlayer.SteamID.ToString(), reason, 2, target, true)) return;
 
             command.ReplyToCommand($"Unsilenced player {namePlayer.PlayerName}.");
         }
         else
         {
-            if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
-            {
-                await MuteManager.UnmutePlayer(pattern, callerSteamId, reason, 2); // Unmute by type 2 (silence)
-            })) return;
+            if (!PenaltyRemoval.TryQueue(callerRef, callerSteamId, pattern, reason, 2, null, false)) return;
 
             command.ReplyToCommand($"Unsilenced offline player with pattern {pattern}.");
         }
