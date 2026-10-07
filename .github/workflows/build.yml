@@ -44,7 +44,7 @@ jobs:
       - name: Restore & Build All Projects
         run: |
           dotnet restore ${{ env.PROJECT_PATH_CS2_SIMPLEADMIN }}
-          dotnet build ${{ env.PROJECT_PATH_CS2_SIMPLEADMIN }} -c Release -o ${{ env.TMP_PATH }}/${{ env.PROJECT_NAME_CS2_SIMPLEADMIN }}
+          dotnet build ${{ env.PROJECT_PATH_CS2_SIMPLEADMIN }} -c Release -o ${{ env.TMP_PATH }}/${{ env.PROJECT_NAME_CS2_SIMPLEADMIN }} -p:InformationalVersion=${{ steps.get_version.outputs.VERSION }}-fork.${{ github.run_number }}
           dotnet restore ${{ env.PROJECT_PATH_CS2_SIMPLEADMINAPI }}
           dotnet build ${{ env.PROJECT_PATH_CS2_SIMPLEADMINAPI }} -c Release -o ${{ env.TMP_PATH }}/${{ env.PROJECT_NAME_CS2_SIMPLEADMINAPI }}
           dotnet restore ${{ env.PROJECT_PATH_FUNCOMMANDSMODULE }}
