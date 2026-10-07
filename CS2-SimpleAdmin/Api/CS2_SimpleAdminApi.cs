@@ -161,24 +161,32 @@ public class CS2_SimpleAdminApi : ICS2_SimpleAdminApi
         ArgumentNullException.ThrowIfNull(callback);
 
         var definition = new CommandDefinition(name, description ?? "No description", callback);
-        if (!RegisterCommands._commandDefinitions.TryGetValue(name, out var list))
+        if (!CustomCommandRegistry.Definitions.TryGetValue(name, out var list))
         {
             list = new List<CommandDefinition>();
-            RegisterCommands._commandDefinitions[name] = list;
+            CustomCommandRegistry.Definitions[name] = list;
         }
         
         list.Add(definition);
     }
 
+    // Seam so tests can run the real UnRegisterCommand without a loaded plugin instance.
+    internal static Action<string, CommandInfo.CommandCallback> CommandRemover =
+        static (name, callback) => CS2_SimpleAdmin.Instance.RemoveCommand(name, callback);
+
     public void UnRegisterCommand(string commandName)
     {
-        var definitions = RegisterCommands._commandDefinitions[commandName];
-        if (definitions.Count == 0)
+        if (string.IsNullOrWhiteSpace(commandName))
+            return;
+
+        // Drop the entry first: the registry must not keep the callbacks (and their owners) alive, and
+        // RegisterCommands.Register must not re-add them later.
+        if (!CustomCommandRegistry.Definitions.Remove(commandName, out var definitions))
             return;
 
         foreach (var definition in definitions)
         {
-            CS2_SimpleAdmin.Instance.RemoveCommand(commandName, definition.Callback);
+            CommandRemover(commandName, definition.Callback);
         }
     }
 

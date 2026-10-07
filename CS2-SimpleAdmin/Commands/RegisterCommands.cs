@@ -9,9 +9,6 @@ namespace CS2_SimpleAdmin;
 
 public static class RegisterCommands
 {
-    internal static readonly Dictionary<string, IList<CommandDefinition>> _commandDefinitions =
-        new(StringComparer.InvariantCultureIgnoreCase);
-    
     private delegate void CommandCallback(CCSPlayerController? caller, CommandInfo.CommandCallback callback);
     
     private static readonly string CommandsPath = Path.Combine(CS2_SimpleAdmin.ConfigDirectory, "Commands.json");
@@ -216,7 +213,7 @@ public static class RegisterCommands
             }
         }
         
-        foreach (var (name, definitions) in _commandDefinitions)
+        foreach (var (name, definitions) in CustomCommandRegistry.Definitions)
         {
             foreach (var definition in definitions)
             {

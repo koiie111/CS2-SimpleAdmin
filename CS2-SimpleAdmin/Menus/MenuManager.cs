@@ -130,6 +130,7 @@ public class MenuManager
         _menuCategories[categoryId].MenuNames.Remove(menuId);
         _menuCategories[categoryId].MenuPermissions.Remove(menuId);
         _menuCategories[categoryId].MenuCommandNames.Remove(menuId);
+        category.MenuLocalizers.Remove(menuId);
     }
 
     /// <summary>
