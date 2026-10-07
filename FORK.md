@@ -1,5 +1,8 @@
 # Форк CS2-SimpleAdmin (koiie111)
 
+[![Build and Publish](https://github.com/koiie111/CS2-SimpleAdmin/actions/workflows/build.yml/badge.svg)](https://github.com/koiie111/CS2-SimpleAdmin/actions/workflows/build.yml)
+[Последняя сборка](https://github.com/koiie111/CS2-SimpleAdmin/releases/latest)
+
 Форк [daffyyyy/CS2-SimpleAdmin](https://github.com/daffyyyy/CS2-SimpleAdmin) для проекта 4ill.ru.
 
 ## Отличия от upstream
