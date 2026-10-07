@@ -150,10 +150,10 @@ public class DatabaseIntegrationTests
         }
 
         await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
-        if (cache.Snapshot.IpsBySteamId.Count < 5000) // a pass reads a bounded number of pages; the next one continues
+        if (cache.Snapshot.IpAccountCount < 5000) // a pass reads a bounded number of pages; the next one continues
             await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
-        Assert.Equal(5000, cache.Snapshot.IpsBySteamId.Count);
-        Assert.Equal(700, cache.Snapshot.AccountsByIp.Count);
+        Assert.Equal(5000, cache.Snapshot.IpAccountCount);
+        Assert.Equal(700, cache.Snapshot.IpAddressCount);
     }
 
     [Theory, MemberData(nameof(Engines))]

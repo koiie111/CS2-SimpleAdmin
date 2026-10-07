@@ -10,8 +10,8 @@ namespace CS2_SimpleAdmin.Managers;
 /// the database on demand, not kept here.</item>
 /// <item><see cref="BySteamId"/>/<see cref="ByIp"/> are derived from <see cref="ActiveBans"/> in the same build, so
 /// a reader can never see a SteamID index of one generation together with an IP index of another.</item>
-/// <item><see cref="IpsBySteamId"/> (multi-account history) and its reverse index <see cref="AccountsByIp"/> are
-/// persistent immutable dictionaries, updated incrementally with structural sharing (O(changes·log n)).</item>
+/// <item><see cref="IpHistory"/> (multi-account history) and its reverse index IP → accounts: compact base + small
+/// persistent overlay, updated incrementally (see <see cref="IpHistoryIndex"/>).</item>
 /// </list>
 /// A reader takes one snapshot reference per operation and never waits for the writer.
 /// </summary>
@@ -19,21 +19,18 @@ internal sealed class BanCacheSnapshot
 {
     public static readonly BanCacheSnapshot Empty = new(
         ImmutableDictionary<int, BanRecord>.Empty,
-        ImmutableDictionary<ulong, ImmutableArray<IpRecord>>.Empty,
-        ImmutableDictionary<uint, ImmutableArray<ulong>>.Empty,
+        IpHistoryIndex.Empty,
         ImmutableHashSet<uint>.Empty,
         isInitialized: false);
 
     private BanCacheSnapshot(
         ImmutableDictionary<int, BanRecord> activeBans,
-        ImmutableDictionary<ulong, ImmutableArray<IpRecord>> ipsBySteamId,
-        ImmutableDictionary<uint, ImmutableArray<ulong>> accountsByIp,
+        IpHistoryIndex ipHistory,
         ImmutableHashSet<uint> ignoredIps,
         bool isInitialized)
     {
         ActiveBans = activeBans;
-        IpsBySteamId = ipsBySteamId;
-        AccountsByIp = accountsByIp;
+        IpHistory = ipHistory;
         IgnoredIps = ignoredIps;
         IsInitialized = isInitialized;
 
@@ -56,15 +53,15 @@ internal sealed class BanCacheSnapshot
     public ImmutableDictionary<int, BanRecord> ActiveBans { get; }
     public IReadOnlyDictionary<ulong, BanRecord[]> BySteamId { get; }
     public IReadOnlyDictionary<uint, BanRecord[]> ByIp { get; }
-    public ImmutableDictionary<ulong, ImmutableArray<IpRecord>> IpsBySteamId { get; }
-    public ImmutableDictionary<uint, ImmutableArray<ulong>> AccountsByIp { get; }
+    public IpHistoryIndex IpHistory { get; }
     public ImmutableHashSet<uint> IgnoredIps { get; }
     public bool IsInitialized { get; }
 
     /// <summary>Checksum of the ACTIVE set, compared with the DB to detect deletions/missed changes.</summary>
     public long ActiveIdSum { get; }
     public int ActiveCount => ActiveBans.Count;
-    public int IpRecordCount => IpsBySteamId.Count;
+    public int IpAccountCount => IpHistory.AccountCount;
+    public int IpAddressCount => IpHistory.AddressCount;
 
     private static void Append<TKey>(Dictionary<TKey, BanRecord[]> index, TKey key, BanRecord ban) where TKey : notnull
     {
@@ -83,16 +80,13 @@ internal sealed class BanCacheSnapshot
 
     // ------------------------------------------------------------------ building
 
-    public static BanCacheSnapshot Create(IEnumerable<BanRecord> activeBans,
-        ImmutableDictionary<ulong, ImmutableArray<IpRecord>> ipsBySteamId,
-        ImmutableDictionary<uint, ImmutableArray<ulong>> accountsByIp,
-        IEnumerable<uint> ignoredIps)
+    public static BanCacheSnapshot Create(IEnumerable<BanRecord> activeBans, IpHistoryIndex ipHistory, IEnumerable<uint> ignoredIps)
     {
         var builder = ImmutableDictionary.CreateBuilder<int, BanRecord>();
         foreach (var ban in activeBans)
             if (ban.StatusEnum == BanStatus.ACTIVE)
                 builder[ban.Id] = ban;
-        return new BanCacheSnapshot(builder.ToImmutable(), ipsBySteamId, accountsByIp, ignoredIps.ToImmutableHashSet(), true);
+        return new BanCacheSnapshot(builder.ToImmutable(), ipHistory, ignoredIps.ToImmutableHashSet(), true);
     }
 
     /// <summary>New generation with the given ban rows upserted (ACTIVE) or removed (any other status).</summary>
@@ -109,49 +103,19 @@ internal sealed class BanCacheSnapshot
             foreach (var id in removedIds) builder.Remove(id);
 
         var next = builder.ToImmutable();
-        return ReferenceEquals(next, ActiveBans) ? this : new BanCacheSnapshot(next, IpsBySteamId, AccountsByIp, IgnoredIps, IsInitialized);
+        return ReferenceEquals(next, ActiveBans) ? this : new BanCacheSnapshot(next, IpHistory, IgnoredIps, IsInitialized);
     }
 
     /// <summary>New generation with IP-history rows merged in (latest used_at per (steamid, ip) wins).</summary>
     public BanCacheSnapshot WithIpHistory(IEnumerable<IpHistoryRow> rows, string unknownName)
     {
-        var ips = IpsBySteamId.ToBuilder();
-        var accounts = AccountsByIp.ToBuilder();
-        var changed = false;
-        foreach (var row in rows)
-        {
-            var steamId = (ulong)row.Steamid;
-            var name = string.IsNullOrEmpty(row.Name) ? unknownName : row.Name;
-            var current = ips.TryGetValue(steamId, out var list) ? list : ImmutableArray<IpRecord>.Empty;
-            var index = -1;
-            for (var i = 0; i < current.Length; i++)
-                if (current[i].Ip == row.Address) { index = i; break; }
-
-            if (index < 0)
-            {
-                ips[steamId] = current.Add(new IpRecord(row.Address, row.Used_at, name));
-                var owners = accounts.TryGetValue(row.Address, out var o) ? o : ImmutableArray<ulong>.Empty;
-                if (!owners.Contains(steamId)) accounts[row.Address] = owners.Add(steamId);
-                changed = true;
-            }
-            else if (row.Used_at >= current[index].UsedAt)
-            {
-                ips[steamId] = current.SetItem(index, new IpRecord(row.Address, row.Used_at, name));
-                changed = true;
-            }
-        }
-
-        return changed ? new BanCacheSnapshot(ActiveBans, ips.ToImmutable(), accounts.ToImmutable(), IgnoredIps, IsInitialized) : this;
+        var next = IpHistory.With(rows, unknownName);
+        return ReferenceEquals(next, IpHistory) ? this : new BanCacheSnapshot(ActiveBans, next, IgnoredIps, IsInitialized);
     }
 
-    /// <summary>Builds both IP dictionaries from a full history (used by the full load).</summary>
-    public static (ImmutableDictionary<ulong, ImmutableArray<IpRecord>> Ips, ImmutableDictionary<uint, ImmutableArray<ulong>> Accounts)
-        BuildIpIndexes(IEnumerable<IpHistoryRow> rows, string unknownName)
-    {
-        var builder = new IpIndexBuilder(unknownName);
-        builder.Add(rows);
-        return builder.Build();
-    }
+    /// <summary>Builds the IP history index from a full history (used by the full load and tests).</summary>
+    public static IpHistoryIndex BuildIpIndexes(IEnumerable<IpHistoryRow> rows, string unknownName) =>
+        IpHistoryIndex.Build(rows.ToList(), unknownName);
 
     // ------------------------------------------------------------------ lookups (pure, any thread)
 
@@ -223,7 +187,7 @@ internal sealed class BanCacheSnapshot
         if (FindBannedOtherAccount(ip, steamId, now) is { } sharedBan)
             return new BanCheckResult(true, sharedBan, BanMatch.SharedIp);
 
-        if (!checkMultiAccounts || !IpsBySteamId.TryGetValue(steamId, out var ownIps))
+        if (!checkMultiAccounts || !IpHistory.TryGetIps(steamId, out var ownIps))
             return BanCheckResult.NotBanned;
 
         // Accounts that share any IP from this player's history. Records older than ExpireOldIpBans are deleted
@@ -241,7 +205,7 @@ internal sealed class BanCacheSnapshot
 
     private BanRecord? FindBannedOtherAccount(uint ip, ulong self, DateTime now)
     {
-        if (!AccountsByIp.TryGetValue(ip, out var owners)) return null;
+        if (!IpHistory.TryGetAccounts(ip, out var owners)) return null;
         foreach (var other in owners)
         {
             if (other == self) continue;
@@ -253,55 +217,16 @@ internal sealed class BanCacheSnapshot
 
     public IReadOnlyList<(ulong SteamId, DateTime UsedAt, string PlayerName)> GetAccountsByIp(uint ip)
     {
-        if (!AccountsByIp.TryGetValue(ip, out var owners)) return [];
+        if (!IpHistory.TryGetAccounts(ip, out var owners)) return [];
         var result = new List<(ulong, DateTime, string)>(owners.Length);
         foreach (var owner in owners)
         {
-            if (!IpsBySteamId.TryGetValue(owner, out var records)) continue;
+            if (!IpHistory.TryGetIps(owner, out var records)) continue;
             foreach (var r in records)
                 if (r.Ip == ip) { result.Add((owner, r.UsedAt, r.PlayerName)); break; }
         }
 
         return result;
-    }
-}
-
-/// <summary>Accumulates IP-history rows (any order, duplicates allowed) and builds both immutable indexes.</summary>
-internal sealed class IpIndexBuilder(string unknownName)
-{
-    private readonly Dictionary<ulong, Dictionary<uint, IpRecord>> _perSteam = new();
-
-    public void Add(IEnumerable<IpHistoryRow> rows)
-    {
-        foreach (var row in rows)
-        {
-            var steamId = (ulong)row.Steamid;
-            if (!_perSteam.TryGetValue(steamId, out var map))
-                _perSteam[steamId] = map = new Dictionary<uint, IpRecord>(2);
-            if (!map.TryGetValue(row.Address, out var existing) || row.Used_at > existing.UsedAt)
-                map[row.Address] = new IpRecord(row.Address, row.Used_at, string.IsNullOrEmpty(row.Name) ? unknownName : row.Name);
-        }
-    }
-
-    public (ImmutableDictionary<ulong, ImmutableArray<IpRecord>> Ips, ImmutableDictionary<uint, ImmutableArray<ulong>> Accounts) Build()
-    {
-        var ips = ImmutableDictionary.CreateBuilder<ulong, ImmutableArray<IpRecord>>();
-        var accountLists = new Dictionary<uint, List<ulong>>();
-        foreach (var (steamId, map) in _perSteam)
-        {
-            ips[steamId] = [..map.Values];
-            foreach (var ip in map.Keys)
-            {
-                if (!accountLists.TryGetValue(ip, out var owners))
-                    accountLists[ip] = owners = new List<ulong>(1);
-                owners.Add(steamId);
-            }
-        }
-
-        var accounts = ImmutableDictionary.CreateBuilder<uint, ImmutableArray<ulong>>();
-        foreach (var (ip, owners) in accountLists)
-            accounts[ip] = [..owners];
-        return (ips.ToImmutable(), accounts.ToImmutable());
     }
 }
 

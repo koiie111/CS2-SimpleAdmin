@@ -137,8 +137,7 @@ internal class CacheManager : IDisposable
             afterId = page[^1].Id;
         }
 
-        var ips = ImmutableDictionary<ulong, ImmutableArray<IpRecord>>.Empty;
-        var accounts = ImmutableDictionary<uint, ImmutableArray<ulong>>.Empty;
+        var ipHistory = IpHistoryIndex.Empty;
         if (config.OtherSettings.CheckMultiAccountsByIp)
         {
             // Keyset pages (async I/O, bounded transient memory) folded into one index builder
@@ -155,7 +154,7 @@ internal class CacheManager : IDisposable
                 cursor = new IpCursor(last.Used_at, last.Steamid, last.Address);
             }
 
-            (ips, accounts) = builder.Build();
+            ipHistory = builder.Build();
         }
 
         var ignored = new List<uint>();
@@ -163,7 +162,7 @@ internal class CacheManager : IDisposable
             if (IpHelper.TryConvertIpToUint(ip, out var value))
                 ignored.Add(value);
 
-        Publish(BanCacheSnapshot.Create(bans, ips, accounts, ignored));
+        Publish(BanCacheSnapshot.Create(bans, ipHistory, ignored));
         _banWatermark = dbNow;
         _ipWatermark = dbNow;
         _ipCursor = null;
@@ -397,7 +396,7 @@ internal class CacheManager : IDisposable
     public bool HasIpForPlayer(ulong steamId, string ipAddress)
     {
         if (string.IsNullOrWhiteSpace(ipAddress) || !IpHelper.TryConvertIpToUint(ipAddress, out var ip)) return false;
-        if (!Snapshot.IpsBySteamId.TryGetValue(steamId, out var records)) return false;
+        if (!Snapshot.IpHistory.TryGetIps(steamId, out var records)) return false;
         foreach (var r in records)
             if (r.Ip == ip) return true;
         return false;
@@ -511,7 +510,7 @@ internal class CacheManager : IDisposable
     {
         var s = Snapshot;
         return $"cache: initialized={s.IsInitialized} activeBans={s.ActiveCount} steamKeys={s.BySteamId.Count} ipKeys={s.ByIp.Count} " +
-               $"ipHistoryAccounts={s.IpsBySteamId.Count} ipHistoryAddresses={s.AccountsByIp.Count} banWatermark={_banWatermark:O} ipWatermark={_ipWatermark:O}\n";
+               $"ipHistoryAccounts={s.IpAccountCount} ipHistoryAddresses={s.IpAddressCount} ipOverlay={s.IpHistory.OverlayCount} banWatermark={_banWatermark:O} ipWatermark={_ipWatermark:O}\n";
     }
 
     /// <summary>

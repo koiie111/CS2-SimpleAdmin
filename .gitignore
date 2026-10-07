@@ -15,3 +15,5 @@ CLAUDE.md
 .claude/
 tests/**/bin/
 tests/**/obj/
+bench/**/bin/
+bench/**/obj/

@@ -22,8 +22,8 @@ public class BanCacheSnapshotTests
 
     private static BanCacheSnapshot Build(IEnumerable<BanRecord> bans, IEnumerable<IpHistoryRow>? history = null, params string[] ignored)
     {
-        var (ips, accounts) = BanCacheSnapshot.BuildIpIndexes(history ?? [], "Unknown");
-        return BanCacheSnapshot.Create(bans, ips, accounts, ignored.Select(IpHelper.IpToUint));
+        var index = BanCacheSnapshot.BuildIpIndexes(history ?? [], "Unknown");
+        return BanCacheSnapshot.Create(bans, index, ignored.Select(IpHelper.IpToUint));
     }
 
     [Fact]
@@ -94,9 +94,11 @@ public class BanCacheSnapshotTests
         var v1 = Build([Ban(1, steam: 10)], [Ip(10, "1.1.1.1")]);
         var v2 = v1.WithBans([Ban(1, steam: 10, status: "UNBANNED")]).WithIpHistory([Ip(10, "2.2.2.2", Now)], "Unknown");
         Assert.True(v1.CheckPlayer(10, null, 0, 0, Now).IsBanned);
-        Assert.Single(v1.IpsBySteamId[10]);
+        Assert.True(v1.IpHistory.TryGetIps(10, out var v1Ips));
+        Assert.Single(v1Ips);
         Assert.False(v2.CheckPlayer(10, null, 0, 0, Now).IsBanned);
-        Assert.Equal(2, v2.IpsBySteamId[10].Length);
+        Assert.True(v2.IpHistory.TryGetIps(10, out var v2Ips));
+        Assert.Equal(2, v2Ips.Length);
     }
 
     [Fact]
