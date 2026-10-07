@@ -613,7 +613,7 @@ public class R10_RecheckN1N6Tests
                 await Assert.ThrowsAnyAsync<IOException>(() => new PermissionManager(null).CommitAdminFilesAsync(prepared, dir));
             Assert.Equal("old-groups", await File.ReadAllTextAsync(groups));
             Assert.Equal("old-admins", await File.ReadAllTextAsync(admins));
-            Assert.Equal(["admins.json", "groups.json"], Directory.GetFiles(dir).Select(f => Path.GetFileName(f)!).Order().ToArray()); // no litter
+            Assert.Equal(["admins.json", "groups.json"], Directory.GetFiles(dir).Select(f => Path.GetFileName(f)!).Where(f => f != "admin-pair.lock").Order().ToArray()); // no litter (the lock file is permanent by design)
         }
         finally { Directory.Delete(dir, true); }
     }
@@ -635,7 +635,8 @@ public class R10_RecheckN1N6Tests
             File.WriteAllText(Admins, "old-admins");
         }
 
-        public string[] Files => Directory.GetFiles(Dir).Select(f => Path.GetFileName(f)!).Order().ToArray();
+        // admin-pair.lock is the pair's permanent lock file (kept on purpose: deleting a lock file is racy); it is not litter
+        public string[] Files => Directory.GetFiles(Dir).Select(f => Path.GetFileName(f)!).Where(f => f != "admin-pair.lock").Order().ToArray();
 
         public void Dispose()
         {
