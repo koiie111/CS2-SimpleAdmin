@@ -172,17 +172,127 @@ public class PermissionManager(IDatabaseProvider? databaseProvider)
     }
 
     /// <summary>
-    /// Replaces groups.json and admins.json: both temp files are written first, then renamed over the targets, so an
-    /// I/O error while writing leaves both originals in place.
+    /// Raised when a failed pair commit could not be rolled back completely: groups.json and admins.json may be from
+    /// different versions until the next commit, which repairs them from the journal. Nothing is applied in that case.
     /// </summary>
-    internal async Task CommitAdminFilesAsync(PreparedAdminReload prepared, string dataDirectory)
+    internal sealed class AdminFilesInconsistentException(string message, Exception inner) : IOException(message, inner);
+
+    /// <summary>Test seam: replaces <c>source</c> over <c>target</c>. Production: <see cref="File.Move(string,string,bool)"/>.</summary>
+    internal static Action<string, string> ReplaceFile { get; set; } = static (source, target) => File.Move(source, target, true);
+
+    private const string PairJournalName = "admin-pair.journal";
+
+    /// <summary>
+    /// Replaces groups.json and admins.json as <b>one version</b>. Two renames are not an atomic operation, so the pair
+    /// is made transactional with a journal and backups:
+    /// <list type="number">
+    /// <item>an interrupted earlier commit (journal present) is repaired first, restoring both originals;</item>
+    /// <item>both temp files are written and both originals backed up (<c>.bak</c>), then the journal is written;</item>
+    /// <item>cancellation / lifetime end is honoured up to this point; from the first replacement on, both files are
+    /// replaced or both are restored;</item>
+    /// <item>if any replacement fails, the files already replaced are restored from the backups and the original
+    /// exception is rethrown (nothing is applied by the caller). If the restore itself fails the journal and backups are
+    /// kept, <see cref="AdminFilesInconsistentException"/> is thrown, and the next commit repairs the pair.</item>
+    /// </list>
+    /// Only after this method returns normally do both files on disk belong to the same prepared version; the apply step
+    /// reads exactly these files.
+    /// </summary>
+    internal async Task CommitAdminFilesAsync(PreparedAdminReload prepared, string dataDirectory,
+        CancellationToken cancellationToken = default)
     {
         var groupsPath = Path.Combine(dataDirectory, "groups.json");
         var adminsPath = Path.Combine(dataDirectory, "admins.json");
-        await File.WriteAllTextAsync(groupsPath + ".tmp", prepared.GroupsJson);
-        await File.WriteAllTextAsync(adminsPath + ".tmp", prepared.AdminsJson);
-        File.Move(groupsPath + ".tmp", groupsPath, true);
-        File.Move(adminsPath + ".tmp", adminsPath, true);
+        var journalPath = Path.Combine(dataDirectory, PairJournalName);
+        string[] targets = [groupsPath, adminsPath];
+
+        RepairInterruptedCommit(journalPath, targets);
+
+        var temps = targets.Select(t => t + ".tmp").ToArray();
+        try
+        {
+            await File.WriteAllTextAsync(temps[0], prepared.GroupsJson, cancellationToken);
+            await File.WriteAllTextAsync(temps[1], prepared.AdminsJson, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Backups of what exists now, and a journal that says which targets had an original
+            var existed = new bool[targets.Length];
+            for (var i = 0; i < targets.Length; i++)
+            {
+                existed[i] = File.Exists(targets[i]);
+                if (existed[i]) File.Copy(targets[i], targets[i] + ".bak", true);
+            }
+
+            await File.WriteAllTextAsync(journalPath, string.Join('\n', existed.Select(e => e ? "1" : "0")), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Point of no return for cancellation: both replaced or both restored
+            var replaced = 0;
+            try
+            {
+                for (; replaced < targets.Length; replaced++)
+                    ReplaceFile(temps[replaced], targets[replaced]);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    RestoreTargets(targets, existed, replaced + 1);
+                    DeleteJournalAndBackups(journalPath, targets);
+                }
+                catch (Exception restoreEx)
+                {
+                    throw new AdminFilesInconsistentException(
+                        "groups.json/admins.json could not be committed and could not be restored; the next reload repairs them: " +
+                        restoreEx.Message, ex);
+                }
+
+                throw;
+            }
+
+            DeleteJournalAndBackups(journalPath, targets);
+        }
+        finally
+        {
+            foreach (var temp in temps)
+                try { File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            // Backups are meaningful only together with a journal; one made before the journal existed is just litter
+            if (!File.Exists(journalPath))
+                foreach (var target in targets)
+                    try { File.Delete(target + ".bak"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>A journal left by a crashed/failed commit: put the original pair back before doing anything else.</summary>
+    private static void RepairInterruptedCommit(string journalPath, string[] targets)
+    {
+        if (!File.Exists(journalPath)) return;
+        var lines = File.ReadAllText(journalPath).Split('\n');
+        var existed = targets.Select((_, i) => i < lines.Length && lines[i].Trim() == "1").ToArray();
+        RestoreTargets(targets, existed, targets.Length);
+        DeleteJournalAndBackups(journalPath, targets);
+    }
+
+    /// <summary>Restores the first <paramref name="count"/> targets from their backups (or deletes them if they did not exist).</summary>
+    private static void RestoreTargets(string[] targets, bool[] existed, int count)
+    {
+        for (var i = 0; i < Math.Min(count, targets.Length); i++)
+        {
+            if (existed[i])
+            {
+                if (File.Exists(targets[i] + ".bak")) File.Copy(targets[i] + ".bak", targets[i], true);
+            }
+            else
+            {
+                File.Delete(targets[i]);
+            }
+        }
+    }
+
+    private static void DeleteJournalAndBackups(string journalPath, string[] targets)
+    {
+        foreach (var target in targets)
+            File.Delete(target + ".bak");
+        File.Delete(journalPath);
     }
 
     /// <summary>
