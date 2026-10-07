@@ -74,6 +74,49 @@ jobs:
           path: |
             CS2-SimpleAdmin-${{ steps.get_version.outputs.VERSION }}.zip
 
+  # SQLite + managed tests. The MySQL/MariaDB theories SKIP here (visibly): this job does NOT verify MySQL/MariaDB.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Unit and SQLite tests
+        run: dotnet test tests/CS2-SimpleAdmin.Tests/CS2-SimpleAdmin.Tests.csproj -c Release
+
+  # Required MySQL/MariaDB job: SA_REQUIRE_MYSQL=1 makes an unreachable server a failure, never a silent skip.
+  tests-mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql57:
+        image: mysql:5.7
+        env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes" }
+        ports: [ "33057:3306" ]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1" --health-interval=5s --health-timeout=5s --health-retries=20
+      mysql80:
+        image: mysql:8.0
+        env: { MYSQL_ALLOW_EMPTY_PASSWORD: "yes" }
+        ports: [ "33080:3306" ]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1" --health-interval=5s --health-timeout=5s --health-retries=20
+      mariadb1011:
+        image: mariadb:10.11
+        env: { MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1" }
+        ports: [ "33110:3306" ]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      SA_REQUIRE_MYSQL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Tests against MySQL 5.7, MySQL 8.0, MariaDB 10.11 (+ SQLite)
+        run: dotnet test tests/CS2-SimpleAdmin.Tests/CS2-SimpleAdmin.Tests.csproj -c Release
+
   publish:
     needs: build
     if: github.event_name != 'pull_request'
