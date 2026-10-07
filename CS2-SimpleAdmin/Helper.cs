@@ -909,6 +909,61 @@ internal static class Helper
         }
     }
 
+    /// <summary>
+    /// fork: configs written by 1.5.x-1.7.x keep the MySQL settings at the root (DatabaseHost, ...),
+    /// while 1.9 reads them from "DatabaseConfig" whose DatabaseType defaults to SQLite. Without this
+    /// such a server silently runs on an empty local SQLite file: no admins, no bans from the site.
+    /// Moves the legacy keys into DatabaseConfig (MySQL) and saves the file.
+    /// </summary>
+    public static void MigrateLegacyDatabaseConfig(CS2_SimpleAdminConfig config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.DatabaseConfig.DatabaseHost) || !File.Exists(CfgPath))
+            return;
+
+        JsonObject? root;
+        try
+        {
+            root = JsonNode.Parse(File.ReadAllText(CfgPath), documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            }) as JsonObject;
+        }
+        catch (JsonException ex)
+        {
+            CS2_SimpleAdmin._logger?.LogWarning($"Could not read legacy database settings from {CfgPath}: {ex.Message}");
+            return;
+        }
+
+        string? Str(string key) => root?[key] is JsonValue v && v.TryGetValue(out string? text) ? text : null;
+
+        var host = Str("DatabaseHost");
+        if (root == null || string.IsNullOrWhiteSpace(host))
+            return;
+
+        var db = config.DatabaseConfig;
+        db.DatabaseType = "MySQL";
+        db.DatabaseHost = host;
+        db.DatabaseName = Str("DatabaseName") ?? "";
+        db.DatabaseUser = Str("DatabaseUser") ?? "";
+        db.DatabasePassword = Str("DatabasePassword") ?? "";
+        if (root["DatabasePort"] is JsonValue port && port.TryGetValue(out int portValue))
+            db.DatabasePort = portValue;
+
+        foreach (var key in new[] { "DatabaseHost", "DatabasePort", "DatabaseUser", "DatabasePassword", "DatabaseName" })
+            root.Remove(key);
+        root["DatabaseConfig"] = JsonSerializer.SerializeToNode(db);
+
+        File.WriteAllText(CfgPath, root.ToJsonString(new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        }));
+
+        CS2_SimpleAdmin._logger?.LogWarning(
+            $"Moved legacy root database settings into DatabaseConfig (MySQL {db.DatabaseUser}@{db.DatabaseHost}:{db.DatabasePort}/{db.DatabaseName}) in {CfgPath}");
+    }
+
     public static void TryLogCommandOnDiscord(CCSPlayerController? caller, string commandString)
     {
         if (CS2_SimpleAdmin.DiscordWebhookClientLog == null || CS2_SimpleAdmin._localizer == null)
