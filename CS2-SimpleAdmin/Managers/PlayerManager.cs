@@ -228,8 +228,19 @@ internal class PlayerManager
             foreach (var account in cache.GetAccountsByIp(session.IpAddress, now, other.ExpireOldIpBans))
                 accounts.Add((account.SteamId, account.PlayerName));
 
-        var stats = await plugin.MuteManager.GetPlayerPenaltyStatsAsync(session.SteamId, config.MultiServerMode, serverId, ct)
-            .ConfigureAwait(false);
+        // The counters are informational: a broken stats query (e.g. a missing sa_warns column) must not stop the
+        // player's active mutes from being applied.
+        PlayerPenaltyStats stats;
+        try
+        {
+            stats = await plugin.MuteManager.GetPlayerPenaltyStatsAsync(session.SteamId, config.MultiServerMode, serverId, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            RateLimitedLog.Error("connect.penalty-stats", ex, "Unable to read penalty counters; applying mutes without them");
+            stats = new PlayerPenaltyStats();
+        }
         var mutes = await plugin.MuteManager.GetActiveMutesAsync(session.SteamId, config.MultiServerMode, other.TimeMode,
             serverId, now, ct).ConfigureAwait(false);
 
