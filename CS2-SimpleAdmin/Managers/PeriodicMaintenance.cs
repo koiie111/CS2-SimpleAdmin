@@ -154,6 +154,10 @@ internal static class PeriodicMaintenance
             await Step("expire-warns", () => plugin.WarnManager.ExpireOldWarns()).ConfigureAwait(false);
             await Step("expire-admins", () => plugin.PermissionManager.DeleteOldAdmins()).ConfigureAwait(false);
 
+            // Mutes/gags issued meanwhile on the site or another server apply to players already online here
+            if (onlineOk)
+                await Step("sync-mutes", () => SyncOnlineMutesAsync(plugin, config, serverId, sessions, ct)).ConfigureAwait(false);
+
             // Online players banned meanwhile (site, other servers): kick the exact connections that were checked
             if (cache != null && sessions.Count > 0)
             {
@@ -185,6 +189,48 @@ internal static class PeriodicMaintenance
             Volatile.Write(ref _running, 0);
             PluginMetrics.PeriodicPass.RecordSince(start);
         }
+    }
+
+    /// <summary>
+    /// Connect loads read mutes once. A mute added later (site, another server, MultiServerMode) would only apply at the
+    /// next connect, so each pass re-reads the active mutes of loaded online players and applies the missing ones.
+    /// </summary>
+    private static async Task SyncOnlineMutesAsync(CS2_SimpleAdmin plugin, CS2_SimpleAdminConfig config, int? serverId,
+        List<PlayerSession> sessions, CancellationToken ct)
+    {
+        var found = new List<(PlayerSession Session, List<Models.ActiveMuteRow> Mutes, long Revision)>();
+        foreach (var session in sessions)
+        {
+            if (session.LoadState != ConnectLoadState.Loaded) continue;
+            ct.ThrowIfCancellationRequested();
+            var revision = PlayerPenaltyManager.NextRevision();
+            var mutes = await plugin.MuteManager.GetActiveMutesAsync(session.SteamId, config.MultiServerMode,
+                config.OtherSettings.TimeMode, serverId, Time.ActualDateTime(), ct).ConfigureAwait(false);
+            if (mutes.Count > 0) found.Add((session, mutes, revision));
+        }
+
+        if (found.Count == 0) return;
+
+        await Runtime.OnGameThread(() =>
+        {
+            foreach (var (session, mutes, revision) in found)
+            {
+                if (!Runtime.Sessions.IsCurrent(session) || PlayerManager.ResolveController(session) is not { } player) continue;
+                foreach (var mute in mutes)
+                {
+                    var type = mute.Type switch
+                    {
+                        "GAG" => PenaltyType.Gag,
+                        "MUTE" => PenaltyType.Mute,
+                        _ => PenaltyType.Silence
+                    };
+                    if (PlayerPenaltyManager.IsPenalized(session.Slot, type, out _)) continue;
+
+                    PlayerPenaltyManager.AddPenalty(session.Slot, type, mute.Ends ?? DateTime.MinValue, mute.Duration, revision);
+                    if (type != PenaltyType.Gag) player.VoiceFlags |= VoiceFlags.Muted;
+                }
+            }
+        }).ConfigureAwait(false);
     }
 
     private static async Task ApplyOnlineTimeAsync(CS2_SimpleAdmin plugin, CS2_SimpleAdminConfig config, int? serverId,
