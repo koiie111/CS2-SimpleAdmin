@@ -24,7 +24,18 @@ public static class PlayerPenaltyManager
     /// (<see cref="NextRevision"/>). A deferred removal captures its own revision when it is accepted and later removes
     /// only entries up to it, so a penalty accepted after the removal can never be erased by it.
     /// </param>
-    internal readonly record struct Entry(DateTime EndDateTime, int Duration, bool Passed, long Revision = 0);
+    /// <param name="DbId">
+    /// sa_mutes.id of the row this entry mirrors: &gt; 0 read from the database, 0 added by this server's own command
+    /// (its row id is not known to the game thread; the first sync after the command's SQL replaces it by the row),
+    /// <see cref="ExternalDbId"/> added through the public API by another plugin (never touched by a database sync).
+    /// </param>
+    internal readonly record struct Entry(DateTime EndDateTime, int Duration, bool Passed, long Revision = 0, long DbId = 0);
+
+    /// <summary><see cref="Entry.DbId"/> of an entry that only exists in memory because another plugin added it.</summary>
+    internal const long ExternalDbId = -1;
+
+    /// <summary>One active database row as the sync sees it.</summary>
+    internal readonly record struct DbPenalty(long Id, PenaltyType Type, DateTime EndDateTime, int Duration);
 
     /// <summary>Immutable penalties of one slot. Index = (int)PenaltyType.</summary>
     internal sealed class SlotPenalties
@@ -89,13 +100,15 @@ public static class PlayerPenaltyManager
     /// <param name="endDateTime">The validity expiration date/time of the penalty.</param>
     /// <param name="durationInMinutes">The duration of the penalty in minutes (0 for permanent).</param>
     public static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes) =>
-        AddPenalty(slot, penaltyType, endDateTime, durationInMinutes, 0);
+        AddPenalty(slot, penaltyType, endDateTime, durationInMinutes, 0, ExternalDbId);
 
     /// <param name="revision">The accept-order position of the operation (0 = take a new one now).</param>
-    internal static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes, long revision)
+    /// <param name="dbId">Row id when the entry mirrors a database row (see <see cref="Entry.DbId"/>).</param>
+    internal static void AddPenalty(int slot, PenaltyType penaltyType, DateTime endDateTime, int durationInMinutes, long revision,
+        long dbId = 0)
     {
         if ((uint)penaltyType >= TypeCount) return;
-        var entry = new Entry(endDateTime, durationInMinutes, false, revision != 0 ? revision : NextRevision());
+        var entry = new Entry(endDateTime, durationInMinutes, false, revision != 0 ? revision : NextRevision(), dbId);
         Update(slot, current =>
         {
             var list = current.Get(penaltyType);
@@ -272,6 +285,104 @@ public static class PlayerPenaltyManager
                 if (e.Revision > upToRevision) next[j++] = e;
             return current.With(penaltyType, next);
         });
+    }
+
+    /// <summary>
+    /// Makes the in-memory gag/mute/silence entries of a slot equal to the database state that was read at
+    /// <paramref name="readRevision"/> (the accept position of the ordered read, see <see cref="Infrastructure.BoundedWorkQueue"/>).
+    /// <list type="bullet">
+    /// <item>A row not mirrored yet is added; a changed one (extended, shortened, converted to permanent) replaces its
+    /// old entry; an entry whose row is gone (unmuted, expired, removed on another server) is dropped.</item>
+    /// <item>Entries accepted <b>after</b> the read (<see cref="Entry.Revision"/> &gt; readRevision) are newer than this
+    /// answer and are never dropped by it, so a stale answer cannot erase a newer mute or resurrect a removed one:
+    /// the read ran in the player's ordered lane, i.e. after every earlier mute/unmute SQL and before every later one.</item>
+    /// <item>Entries added through the public API (<see cref="ExternalDbId"/>) are not database state and stay.</item>
+    /// <item>Several overlapping rows of any types stay several entries; a type's restriction holds while any entry does.</item>
+    /// </list>
+    /// </summary>
+    /// <returns>True when a MUTE/SILENCE restriction was in force before and none is now (voice may be released).</returns>
+    internal static bool ReconcileWithDatabase(int slot, long readRevision, IReadOnlyList<DbPenalty> rows)
+    {
+        var releasedVoice = false;
+        Update(slot, current =>
+        {
+            releasedVoice = false;
+            var changed = current;
+            foreach (var type in SyncedTypes)
+            {
+                var existing = current.Get(type);
+                var kept = new List<Entry>();
+                var keptIds = new HashSet<long>();
+                if (existing != null)
+                    foreach (var e in existing)
+                    {
+                        // Newer than the read, or not database state at all: not this answer's business
+                        if (e.Revision > readRevision || e.DbId == ExternalDbId)
+                        {
+                            kept.Add(e);
+                            if (e.DbId > 0) keptIds.Add(e.DbId);
+                        }
+                    }
+
+                foreach (var row in rows)
+                {
+                    if (row.Type != type || keptIds.Contains(row.Id)) continue;
+                    kept.Add(new Entry(row.EndDateTime, row.Duration, false, readRevision, row.Id));
+                }
+
+                var before = existing ?? [];
+                var same = before.Length == kept.Count;
+                if (same)
+                    for (var i = 0; i < before.Length && same; i++)
+                        same = before[i] == kept[i];
+                if (same) continue;
+
+                changed = changed.With(type, kept.ToArray());
+            }
+
+            if (ReferenceEquals(changed, current)) return current;
+            releasedVoice = HasVoice(current) && !HasVoice(changed);
+            return changed;
+        });
+        return releasedVoice;
+    }
+
+    private static readonly PenaltyType[] SyncedTypes = [PenaltyType.Gag, PenaltyType.Mute, PenaltyType.Silence];
+
+    private static bool HasVoice(SlotPenalties state) =>
+        state.Get(PenaltyType.Mute) is { Length: > 0 } || state.Get(PenaltyType.Silence) is { Length: > 0 };
+
+    /// <summary>
+    /// TimeMode 0: the database says the row <paramref name="dbId"/> has used up its online minutes. Marks exactly
+    /// that entry; returns false when no entry mirrors the row (the caller then falls back to the end time).
+    /// </summary>
+    internal static bool MarkPassedByDbId(int slot, long dbId)
+    {
+        var found = false;
+        Update(slot, current =>
+        {
+            found = false;
+            var changed = current;
+            for (var t = 0; t < TypeCount; t++)
+            {
+                var list = changed.ByType[t];
+                if (list == null) continue;
+                Entry[]? copy = null;
+                for (var i = 0; i < list.Length; i++)
+                {
+                    if (list[i].DbId != dbId) continue;
+                    found = true;
+                    if (list[i].Passed) continue;
+                    copy ??= (Entry[])list.Clone();
+                    copy[i] = copy[i] with { Passed = true };
+                }
+
+                if (copy != null) changed = changed.With((PenaltyType)t, copy);
+            }
+
+            return changed;
+        });
+        return found;
     }
 
     /// <summary>

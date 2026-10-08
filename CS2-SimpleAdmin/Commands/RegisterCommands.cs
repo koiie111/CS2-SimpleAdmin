@@ -3,6 +3,7 @@ using System.Text.Json;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Commands;
 using CounterStrikeSharp.API.Modules.Commands;
+using CS2_SimpleAdmin.Infrastructure;
 using Microsoft.Extensions.Logging;
 
 namespace CS2_SimpleAdmin;
@@ -176,6 +177,7 @@ public static class RegisterCommands
     [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
     private static void Register()
     {
+        GagChatCommands.ResetOwn();
         var json = File.ReadAllText(CommandsPath);
         var commandsConfig = JsonSerializer.Deserialize<CommandsConfig>(json, 
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -202,6 +204,7 @@ public static class RegisterCommands
                 foreach (var alias in aliases)
                 {
                     CS2_SimpleAdmin.Instance.AddCommand(alias, "", mapping.Callback);
+                    GagChatCommands.NoteRegistered(mapping.CommandKey, alias);
                 }
             }
 
@@ -210,6 +213,7 @@ public static class RegisterCommands
             {
                 CS2_SimpleAdmin._logger?.LogInformation($"Registering command: `{mapping.CommandKey}` (not in Commands.json, using default alias)");
                 CS2_SimpleAdmin.Instance.AddCommand(mapping.CommandKey, "", mapping.Callback);
+                GagChatCommands.NoteRegistered(mapping.CommandKey, mapping.CommandKey);
             }
         }
         

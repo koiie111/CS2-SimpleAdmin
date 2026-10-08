@@ -54,9 +54,9 @@ public class R5_OnlineCreditTests
         var manager = new MuteManager(provider);
         var credit = Credit(Steam, 1); // the SAME object is retried, as the maintenance pass does
 
-        await Assert.ThrowsAnyAsync<Exception>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, default));
+        await Assert.ThrowsAnyAsync<Exception>(() => manager.CheckOnlineModeMutesAsync([credit], default));
         provider.FailExpiredRead = false;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
 
         Assert.Equal(1, await Passed(db, mute)); // was 2 before the fix
     }
@@ -72,12 +72,12 @@ public class R5_OnlineCreditTests
         var fail = true;
         manager.FaultHook = point => fail && point == "after-plan" ? throw new IOException("lost connection") : Task.CompletedTask;
 
-        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, default));
+        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], default));
         Assert.Equal(0, await Passed(db, mute));
         Assert.NotNull(credit.Plan); // the plan survives; the retry reuses its pre-image
 
         fail = false;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(3, await Passed(db, mute));
     }
 
@@ -92,12 +92,12 @@ public class R5_OnlineCreditTests
         var fail = true;
         manager.FaultHook = point => fail && point == "before-commit" ? throw new IOException("died before commit") : Task.CompletedTask;
 
-        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, default));
+        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], default));
         Assert.Equal(0, await Passed(db, mute)); // transaction rolled back
         Assert.False(credit.Applied);
 
         fail = false;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(2, await Passed(db, mute));
         Assert.True(credit.Applied);
     }
@@ -114,13 +114,13 @@ public class R5_OnlineCreditTests
         // the database committed, but the plugin never learns about it
         manager.FaultHook = point => fail && point == "after-commit" ? throw new IOException("connection reset after commit") : Task.CompletedTask;
 
-        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, default));
+        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync([credit], default));
         Assert.Equal(1, await Passed(db, mute)); // it IS in the database
         Assert.False(credit.Applied);            // but the plugin does not know
 
         fail = false;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default); // and again, for good measure
+        await manager.CheckOnlineModeMutesAsync([credit], default);
+        await manager.CheckOnlineModeMutesAsync([credit], default); // and again, for good measure
         Assert.Equal(1, await Passed(db, mute));
     }
 
@@ -147,11 +147,11 @@ public class R5_OnlineCreditTests
             return Task.CompletedTask;
         };
 
-        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync(credits, true, null, default));
+        await Assert.ThrowsAsync<IOException>(() => manager.CheckOnlineModeMutesAsync(credits, default));
         Assert.Equal(MuteManager.OnlineBatchSize, credits.Count(c => c.Applied)); // batch 1 committed and acknowledged, batch 2 lost
 
         failOnSecondCommit = false;
-        await manager.CheckOnlineModeMutesAsync(credits, true, null, default);
+        await manager.CheckOnlineModeMutesAsync(credits, default);
         Assert.All(credits, c => Assert.True(c.Applied));
         foreach (var id in muteIds) Assert.Equal(1, await Passed(db, id));
     }
@@ -172,11 +172,11 @@ public class R5_OnlineCreditTests
         };
 
         // the commit is in; the next awaited database call observes the cancellation
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.CheckOnlineModeMutesAsync([credit], cts.Token));
         Assert.Equal(1, await Passed(db, mute));
 
         manager.FaultHook = null;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(1, await Passed(db, mute));
     }
 
@@ -191,9 +191,9 @@ public class R5_OnlineCreditTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.CheckOnlineModeMutesAsync([credit], true, null, cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.CheckOnlineModeMutesAsync([credit], cts.Token));
         Assert.Equal(0, await Passed(db, mute));
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(1, await Passed(db, mute));
     }
 
@@ -210,14 +210,14 @@ public class R5_OnlineCreditTests
         // pass 1: three minutes accrued, database credited, the game-thread fold never ran
         var pass1 = PeriodicMaintenance.ComputeCredits([session], nowTicks, DateTime.Now);
         var credit = Assert.Single(pass1).Credit;
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.True(credit.Applied);
         Assert.Equal(0, session.CreditedTicks);
 
         // pass 2: the session still owes the SAME credit, not a new window
         var pass2 = PeriodicMaintenance.ComputeCredits([session], nowTicks + OnlineCredit.TicksPerMinute, DateTime.Now);
         Assert.Same(credit, Assert.Single(pass2).Credit);
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(3, await Passed(db, mute)); // 3 minutes once, not 3 + 4
 
         // fold (game thread), then the next window starts where this one ended
@@ -240,7 +240,7 @@ public class R5_OnlineCreditTests
         var after = await AddMute(db, Steam, created: end.AddSeconds(30));               // issued after the window
         var manager = new MuteManager(db.Provider);
 
-        await manager.CheckOnlineModeMutesAsync([Credit(Steam, 5, end)], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([Credit(Steam, 5, end)], default);
 
         Assert.Equal(5, await Passed(db, old));
         Assert.Equal(1, await Passed(db, midway)); // floor(1.5) whole minutes, never the 3.5 earlier ones
@@ -263,7 +263,7 @@ public class R5_OnlineCreditTests
             await c.ExecuteAsync("UPDATE sa_mutes SET passed = 40 WHERE id = @mute", new { mute }); // e.g. the site
         };
 
-        await manager.CheckOnlineModeMutesAsync([credit], true, null, default);
+        await manager.CheckOnlineModeMutesAsync([credit], default);
         Assert.Equal(40, await Passed(db, mute)); // under-crediting is the safe direction
     }
 
@@ -275,14 +275,14 @@ public class R5_OnlineCreditTests
         var mute = await AddMute(db, Steam, duration: 1);
         var manager = new MuteManager(db.Provider);
 
-        var expired = await manager.CheckOnlineModeMutesAsync([Credit(Steam, 1)], true, null, default);
+        var expired = await manager.CheckOnlineModeMutesAsync([Credit(Steam, 1)], default);
         var row = Assert.Single(expired);
         Assert.Equal((long)Steam, row.SteamId);
         Assert.Equal(End, row.Ends);
         Assert.Equal(1, await Passed(db, mute));
 
         // an already used-up mute is not credited again, but is still reported
-        var again = await manager.CheckOnlineModeMutesAsync([Credit(Steam, 1)], true, null, default);
+        var again = await manager.CheckOnlineModeMutesAsync([Credit(Steam, 1)], default);
         Assert.Single(again);
         Assert.Equal(1, await Passed(db, mute));
     }
@@ -336,7 +336,7 @@ public class R5_OnlineCreditTests
         var provider = new CountingApplyProvider(db.Provider, () => Interlocked.Increment(ref statements));
         var credits = Enumerable.Range(0, 100).Select(i => Credit(Steam + (ulong)i, 1)).ToList();
 
-        await new MuteManager(provider).CheckOnlineModeMutesAsync(credits, true, null, default);
+        await new MuteManager(provider).CheckOnlineModeMutesAsync(credits, default);
         Assert.Equal(2, statements); // ceil(100 / 64) compare-and-set statements, not 100
     }
 
@@ -344,8 +344,8 @@ public class R5_OnlineCreditTests
     {
         public override Task<System.Data.Common.DbConnection> CreateConnectionAsync(CancellationToken cancellationToken = default) =>
             inner.CreateConnectionAsync(cancellationToken);
-        public override string GetOnlineCreditPlanQuery(bool multiServer) => inner.GetOnlineCreditPlanQuery(multiServer);
-        public override string GetExpiredOnlineMutesBatchQuery(bool multiServer) => inner.GetExpiredOnlineMutesBatchQuery(multiServer);
+        public override string GetOnlineCreditPlanQuery() => inner.GetOnlineCreditPlanQuery();
+        public override string GetExpiredOnlineMutesBatchQuery() => inner.GetExpiredOnlineMutesBatchQuery();
         public override string GetApplyOnlineCreditQuery(IReadOnlyList<OnlineCreditStep> steps)
         {
             onApply();

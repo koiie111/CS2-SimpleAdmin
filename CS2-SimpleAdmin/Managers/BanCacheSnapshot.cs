@@ -181,9 +181,9 @@ internal sealed class BanCacheSnapshot
     /// player's history is banned. Uses the IP → accounts reverse index: O(own IPs + accounts sharing them).
     /// </summary>
     public BanCheckResult CheckPlayerOrAnyIp(ulong steamId, string? ipAddress, int banType, int expireOldIpBansDays,
-        bool checkMultiAccounts, DateTime now)
+        bool checkMultiAccounts, DateTime now, bool includeSteamMatch = true)
     {
-        if (FindActiveBySteamId(steamId, now) is { } steamBan)
+        if (includeSteamMatch && FindActiveBySteamId(steamId, now) is { } steamBan)
             return new BanCheckResult(true, steamBan, BanMatch.SteamId);
 
         if (banType == 0 || string.IsNullOrEmpty(ipAddress) || !IpHelper.TryConvertIpToUint(ipAddress, out var ip) ||

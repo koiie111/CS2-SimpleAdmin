@@ -12,6 +12,9 @@ internal static class ChatTriggers
 
     private static Cache? _cache;
 
+    /// <summary>The configured public and silent triggers (cached array).</summary>
+    public static string[] Current => GetTriggers();
+
     public static bool StartsWithTrigger(string message)
     {
         var triggers = GetTriggers();
@@ -35,13 +38,15 @@ internal static class ChatTriggers
     }
 
     /// <summary>
-    /// For a gagged player: the chat-trigger message as a safe "css_..." console command, or null when it is not a
-    /// command-shaped message ("!привет", "!ez gg", "!x;quit"). Only ASCII command names without separators qualify,
-    /// so a trigger prefix cannot be used to push free text into public chat.
+    /// For a gagged player: the chat-trigger message as one console command ("css_name args"), or null when the line must
+    /// be dropped. A line qualifies only if all of these hold: exactly one trigger prefix; a command name of ASCII letters,
+    /// digits and '_' (optional "css_" prefix); the name is on the allow-list (<paramref name="allowed"/>, bare name); the
+    /// whole remainder is printable ASCII without ';', quotes and backslashes (no command chaining, no quoting tricks) and at
+    /// most 128 characters. "!привет", "!ez gg", "!x;quit", "!say hi", "!!x" and "! " all give null.
     /// </summary>
-    public static string? ToSilentCommand(string message) => ToSilentCommand(message, GetTriggers());
+    public static string? ToSilentCommand(string message, Func<string, bool> allowed) => ToSilentCommand(message, GetTriggers(), allowed);
 
-    internal static string? ToSilentCommand(string message, string[] triggers)
+    internal static string? ToSilentCommand(string message, string[] triggers, Func<string, bool> allowed)
     {
         foreach (var trigger in triggers)
         {
@@ -50,6 +55,9 @@ internal static class ChatTriggers
             var rest = message.AsSpan(trigger.Length).Trim();
             if (rest.IsEmpty || rest.Length > 128) return null;
 
+            foreach (var c in rest)
+                if (c is < ' ' or > '~' or ';' or '"' or '\\') return null;
+
             var nameEnd = rest.IndexOf(' ');
             var name = nameEnd < 0 ? rest : rest[..nameEnd];
             if (name.Length > 32) return null;
@@ -57,19 +65,19 @@ internal static class ChatTriggers
                 if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_'))
                     return null;
 
-            foreach (var c in rest)
-                if (c is ';' or '"' or '\n' or '\r' or '\\' || char.IsControl(c))
-                    return null;
+            var bare = StripPrefix(name.ToString()).ToLowerInvariant();
+            if (bare.Length == 0 || !allowed(bare)) return null;
 
-            // Arguments of a command typed by a gagged player must be ASCII too, otherwise "!vip привет всем" is chat
-            foreach (var c in rest)
-                if (c > 127) return null;
-
-            return "css_" + rest.ToString();
+            var args = nameEnd < 0 ? "" : rest[nameEnd..].Trim().ToString();
+            return args.Length == 0 ? "css_" + bare : "css_" + bare + " " + args;
         }
 
         return null;
     }
+
+    /// <summary>"css_admin" → "admin"; "admin" → "admin".</summary>
+    internal static string StripPrefix(string name) =>
+        name.StartsWith("css_", StringComparison.OrdinalIgnoreCase) ? name[4..] : name;
 
     /// <summary>For tests: the matching rule without CoreConfig.</summary>
     internal static bool StartsWithAny(string message, string[] triggers)

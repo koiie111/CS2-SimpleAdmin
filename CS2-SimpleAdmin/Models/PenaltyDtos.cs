@@ -21,14 +21,25 @@ public sealed class MuteStats
 /// <summary>An active gag/mute/silence as needed to apply it on connect.</summary>
 public sealed class ActiveMuteRow
 {
+    /// <summary>sa_mutes.id: the identity of the row, so a later read can tell "same mute", "extended" and "gone" apart.</summary>
+    public long Id { get; init; }
+
+    /// <summary>Owner (player_steamid). Set by the batched read, 0 for the single-player read.</summary>
+    public long SteamId { get; init; }
+
     public string Type { get; init; } = "GAG";
     public DateTime? Ends { get; init; }
     public int Duration { get; init; }
+    public DateTime? Created { get; init; }
+
+    /// <summary>Online minutes already used (TimeMode 0).</summary>
+    public int Passed { get; init; }
 }
 
 /// <summary>TimeMode 0: a mute whose online minutes are used up.</summary>
 public sealed class ExpiredOnlineMuteRow
 {
+    public long Id { get; init; }
     public long SteamId { get; init; }
     public DateTime? Ends { get; init; }
 }

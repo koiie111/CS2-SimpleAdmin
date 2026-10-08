@@ -345,9 +345,9 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
     try
     {
         await using var connection = await databaseProvider.CreateConnectionAsync();
-        var sqlRetrieveBans = databaseProvider.GetUnbanRetrieveBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
+        var sqlRetrieveBans = databaseProvider.GetUnbanRetrieveBansQuery();
 
-        var bans = await connection.QueryAsync(sqlRetrieveBans, new { pattern = playerPattern, serverid = CS2_SimpleAdmin.ServerId });
+        var bans = await connection.QueryAsync(sqlRetrieveBans, new { pattern = playerPattern });
         var bansList = bans as dynamic[] ?? bans.ToArray();
         if (bansList.Length == 0)
             return;
@@ -357,7 +357,9 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
 
         foreach (var ban in bansList)
         {
-            int banId = ban.id;
+            // SQLite returns INTEGER as Int64, MySQL INT as Int32: an implicit cast of the dynamic value threw on SQLite and the
+            // swallowed exception left the ban active
+            int banId = (int)Convert.ToInt64(ban.id);
 
             var sqlInsertUnban = databaseProvider.GetInsertUnbanQuery(reason != null);
             var unbanId = await connection.ExecuteScalarAsync<int>(sqlInsertUnban, new { banId, adminId, reason });
@@ -368,7 +370,7 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
 
         // Apply immediately; the periodic cache refresh would otherwise keep rejecting the player for up to a minute
         if (CS2_SimpleAdmin.Instance.CacheManager is { } cache)
-            await cache.SetBanStatusAsync(bansList.Select(b => (int)b.id).ToList(), Models.BanStatus.UNBANNED);
+            await cache.SetBanStatusAsync(bansList.Select(b => (int)Convert.ToInt64(b.id)).ToList(), Models.BanStatus.UNBANNED);
 
         // css_ban also issues a native banid when UnlockedCommands is on; clear it so the engine stops
         // rejecting the player. Done here, after the rows are updated, and for whichever pattern matched them.
@@ -481,13 +483,13 @@ public async Task UnbanPlayer(string playerPattern, string adminSteamId, string 
         try
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
-            var sql = databaseProvider.GetExpireBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-            await connection.ExecuteAsync(sql, new { currentTime, serverid = CS2_SimpleAdmin.ServerId });
+            var sql = databaseProvider.GetExpireBansQuery();
+            await connection.ExecuteAsync(sql, new { currentTime });
             if (CS2_SimpleAdmin.CurrentConfig.OtherSettings.ExpireOldIpBans > 0)
             {
                 var ipBansTime = currentTime.AddDays(-CS2_SimpleAdmin.CurrentConfig.OtherSettings.ExpireOldIpBans);
-                sql = databaseProvider.GetExpireIpBansQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-                await connection.ExecuteAsync(sql, new { ipBansTime, CS2_SimpleAdmin.ServerId });
+                sql = databaseProvider.GetExpireIpBansQuery();
+                await connection.ExecuteAsync(sql, new { ipBansTime });
 
                 sql = databaseProvider.GetExpireOldPlayerIpsQuery();
                 await connection.ExecuteAsync(sql, new { ipBansTime });

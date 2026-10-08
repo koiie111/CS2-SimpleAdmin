@@ -556,7 +556,6 @@ public partial class CS2_SimpleAdmin
 
         // Built on a DB worker next to the current cache (which keeps serving checks), never on this thread
         var config = Config;
-        var serverId = ServerId;
         var callerSlot = caller?.Slot;
         var callerSteamId = caller?.SteamID;
         if (!Runtime.TryQueueDb("reload-bans", async ct =>
@@ -564,7 +563,7 @@ public partial class CS2_SimpleAdmin
                 string message;
                 try
                 {
-                    await cache.ForceReInitializeCacheAsync(config, serverId, ct);
+                    await cache.ForceReInitializeCacheAsync(config, ct);
                     message = $"Reloaded bans ({cache.Snapshot.ActiveCount} active)";
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -902,14 +901,12 @@ public partial class CS2_SimpleAdmin
         CS2_SimpleAdminApi.PlayerInfo targetInfo, string menuTitle, int page)
     {
         var steamId = targetInfo.SteamId.SteamId64;
-        var multiServer = Config.MultiServerMode;
-        var serverId = ServerId;
         return Runtime.TryQueueDb("warns-menu", async ct =>
         {
             (int Total, List<Models.WarnMenuRow> Rows) result;
             try
             {
-                result = await WarnManager.GetPlayerWarnsPageAsync(steamId, multiServer, serverId, page, WarnManager.MenuPageSize, ct);
+                result = await WarnManager.GetPlayerWarnsPageAsync(steamId, page, WarnManager.MenuPageSize, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1026,13 +1023,11 @@ public partial class CS2_SimpleAdmin
     {
         var callerSlot = caller?.Slot;
         var callerSteamId = caller?.SteamID;
-        var multiServer = Config.MultiServerMode;
-        var serverId = ServerId;
         var localizer = _localizer!;
 
         var accepted = Runtime.TryQueueDb("history", async ct =>
         {
-            var result = await PlayerManager.GetPenaltyHistoryPage(steamId, filter, page, HistoryConsolePageSize, multiServer, serverId, ct);
+            var result = await PlayerManager.GetPenaltyHistoryPage(steamId, filter, page, HistoryConsolePageSize, ct);
             // Offline players are only known by SteamID; borrow the name stored on their latest record
             var displayName = name ?? (result.Rows.Count > 0 ? result.Rows[0].Player_Name : null) ?? steamId.ToString();
             var lines = FormatHistory(localizer, displayName, steamId, result, filter);

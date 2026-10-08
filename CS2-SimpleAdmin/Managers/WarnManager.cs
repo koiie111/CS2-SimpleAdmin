@@ -104,8 +104,8 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
 
-            var sql = databaseProvider.GetPlayerWarnsQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode, active);
-            var parameters = new { PlayerSteamID = player.SteamId.SteamId64, serverid = CS2_SimpleAdmin.ServerId };
+            var sql = databaseProvider.GetPlayerWarnsQuery(active);
+            var parameters = new { PlayerSteamID = player.SteamId.SteamId64 };
             var warns = await connection.QueryAsync<dynamic>(sql, parameters);
 
             return warns.ToList();
@@ -124,18 +124,18 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
     /// One page of a player's warns for the menu (fixed page size, stable order, reason cut in SQL). Runs on a DB
     /// worker. Unlike <see cref="GetPlayerWarns"/> a database error propagates, so the caller can tell the admin.
     /// </summary>
-    internal async Task<(int Total, List<Models.WarnMenuRow> Rows)> GetPlayerWarnsPageAsync(ulong steamId, bool multiServer,
-        int? serverId, int page, int pageSize, CancellationToken ct)
+    internal async Task<(int Total, List<Models.WarnMenuRow> Rows)> GetPlayerWarnsPageAsync(ulong steamId,
+        int page, int pageSize, CancellationToken ct)
     {
         if (databaseProvider == null) return (0, []);
         page = Math.Max(1, page);
         await using var connection = await databaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false);
         var total = Convert.ToInt32(await connection.ExecuteScalarAsync<object>(new CommandDefinition(
-            databaseProvider.GetWarnsMenuCountQuery(multiServer), new { PlayerSteamID = steamId, serverid = serverId },
+            databaseProvider.GetWarnsMenuCountQuery(), new { PlayerSteamID = steamId },
             cancellationToken: ct)).ConfigureAwait(false));
         var rows = (await connection.QueryAsync<Models.WarnMenuRow>(new CommandDefinition(
-            databaseProvider.GetWarnsMenuPageQuery(multiServer),
-            new { PlayerSteamID = steamId, serverid = serverId, limit = pageSize, offset = (page - 1) * pageSize },
+            databaseProvider.GetWarnsMenuPageQuery(),
+            new { PlayerSteamID = steamId, limit = pageSize, offset = (page - 1) * pageSize },
             cancellationToken: ct)).ConfigureAwait(false)).AsList();
         return (total, rows);
     }
@@ -154,8 +154,8 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
 
-            var sql = databaseProvider.GetPlayerWarnsCountQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode, active);
-            var warnsCount = await connection.ExecuteScalarAsync<int>(sql, new { PlayerSteamID = steamId, serverid = CS2_SimpleAdmin.ServerId });
+            var sql = databaseProvider.GetPlayerWarnsCountQuery(active);
+            var warnsCount = await connection.ExecuteScalarAsync<int>(sql, new { PlayerSteamID = steamId });
             return warnsCount;
         }
         catch (Exception ex)
@@ -179,8 +179,8 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
 
-            var sql = databaseProvider.GetUnwarnByIdQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-            await connection.ExecuteAsync(sql, new { steamid = player.SteamId.SteamId64, warnId, serverid = CS2_SimpleAdmin.ServerId });
+            var sql = databaseProvider.GetUnwarnByIdQuery();
+            await connection.ExecuteAsync(sql, new { steamid = player.SteamId.SteamId64, warnId });
         }
         catch (Exception ex)
         {
@@ -201,8 +201,8 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
 
-            var sql = databaseProvider.GetUnwarnLastQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-            await connection.ExecuteAsync(sql, new { steamid = playerPattern, serverid = CS2_SimpleAdmin.ServerId });
+            var sql = databaseProvider.GetUnwarnLastQuery();
+            await connection.ExecuteAsync(sql, new { steamid = playerPattern });
         }
         catch (Exception ex)
         {
@@ -222,8 +222,8 @@ internal class WarnManager(IDatabaseProvider? databaseProvider)
         {
             await using var connection = await databaseProvider.CreateConnectionAsync();
 
-            var sql = databaseProvider.GetExpireWarnsQuery(CS2_SimpleAdmin.CurrentConfig.MultiServerMode);
-            await connection.ExecuteAsync(sql, new { CurrentTime = Time.ActualDateTime(), serverid = CS2_SimpleAdmin.ServerId });
+            var sql = databaseProvider.GetExpireWarnsQuery();
+            await connection.ExecuteAsync(sql, new { CurrentTime = Time.ActualDateTime() });
         }
         catch (Exception ex)
         {

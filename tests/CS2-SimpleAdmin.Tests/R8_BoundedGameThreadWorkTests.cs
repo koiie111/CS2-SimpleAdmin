@@ -42,7 +42,7 @@ public class R8_BoundedGameThreadWorkTests
         await SeedWarns(db, history);
         var manager = new WarnManager(db.Provider);
 
-        var (total, rows) = await manager.GetPlayerWarnsPageAsync(Steam, true, null, 1, WarnManager.MenuPageSize, default);
+        var (total, rows) = await manager.GetPlayerWarnsPageAsync(Steam, 1, WarnManager.MenuPageSize, default);
 
         Assert.Equal(history, total);
         Assert.Equal(Math.Min(history, WarnManager.MenuPageSize), rows.Count); // O(page), not O(history)
@@ -63,7 +63,7 @@ public class R8_BoundedGameThreadWorkTests
         var previousId = int.MaxValue;
         for (var page = 1; page <= pages; page++)
         {
-            var (total, rows) = await manager.GetPlayerWarnsPageAsync(Steam, true, null, page, WarnManager.MenuPageSize, default);
+            var (total, rows) = await manager.GetPlayerWarnsPageAsync(Steam, page, WarnManager.MenuPageSize, default);
             Assert.Equal(history, total);
             foreach (var r in rows)
             {
@@ -82,21 +82,19 @@ public class R8_BoundedGameThreadWorkTests
 
         Assert.Equal(history, seen.Count);
         Assert.Equal(history, seen.Distinct().Count()); // no repeated and no skipped row across pages
-        var (_, beyond) = await manager.GetPlayerWarnsPageAsync(Steam, true, null, pages + 1, WarnManager.MenuPageSize, default);
+        var (_, beyond) = await manager.GetPlayerWarnsPageAsync(Steam, pages + 1, WarnManager.MenuPageSize, default);
         Assert.Empty(beyond);
     }
 
     [Fact]
-    public async Task SingleServerModeOnlySeesThisServersWarns()
+    public async Task WarnsOfEveryServerAreCounted()
     {
         await using var db = await TestDatabases.CreateAsync("SQLite");
         await SeedWarns(db, 20);
         var manager = new WarnManager(db.Provider);
-        var (mine, _) = await manager.GetPlayerWarnsPageAsync(Steam, false, 1, 1, 8, default);
-        var (other, rows) = await manager.GetPlayerWarnsPageAsync(Steam, false, 2, 1, 8, default);
-        Assert.Equal(20, mine);
-        Assert.Equal(0, other);
-        Assert.Empty(rows);
+        var (total, rows) = await manager.GetPlayerWarnsPageAsync(Steam, 1, 8, default);
+        Assert.Equal(20, total); // whichever server issued them
+        Assert.Equal(8, rows.Count);
     }
 
     [Fact]
@@ -104,7 +102,7 @@ public class R8_BoundedGameThreadWorkTests
     {
         var provider = new OutageProvider();
         await Assert.ThrowsAsync<IOException>(() =>
-            new WarnManager(provider).GetPlayerWarnsPageAsync(Steam, true, null, 1, 8, default));
+            new WarnManager(provider).GetPlayerWarnsPageAsync(Steam, 1, 8, default));
     }
 
     // ---- admin help ----

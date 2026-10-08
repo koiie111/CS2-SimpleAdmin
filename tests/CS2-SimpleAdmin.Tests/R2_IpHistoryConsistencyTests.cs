@@ -49,11 +49,11 @@ public class R2_IpHistoryConsistencyTests
         await AddBan(db, 2, now);
         await AddIp(db, 2, "10.20.30.40", now.AddDays(-100));
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
         await Exec(db, "DELETE FROM sa_players_ips WHERE used_at <= @cutoff", new { cutoff = now.AddDays(-30) });
-        await cache.RefreshCacheAsync(config, null, default);
+        await cache.RefreshCacheAsync(config, default);
         using var rebuilt = new CacheManager();
-        await rebuilt.InitializeCacheAsync(config, null, default);
+        await rebuilt.InitializeCacheAsync(config, default);
         Assert.False(rebuilt.CheckBan(config, 1, "10.20.30.40", now).IsBanned);
         Assert.False(cache.CheckBan(config, 1, "10.20.30.40", now).IsBanned,
             "Incremental cache still bans a different account using IP ownership already deleted by SQL expiry");
@@ -81,7 +81,7 @@ public class R2_IpHistoryConsistencyTests
     private static async Task<CacheManager> Rebuild(CS2_SimpleAdminConfig config)
     {
         var rebuilt = new CacheManager();
-        await rebuilt.InitializeCacheAsync(config, null, default);
+        await rebuilt.InitializeCacheAsync(config, default);
         return rebuilt;
     }
 
@@ -110,7 +110,7 @@ public class R2_IpHistoryConsistencyTests
         await AddIp(db, 7, "10.0.0.5", now.AddDays(-2));
 
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
 
         // expiry job, renewal, external delete
         await new BanManager(db.Provider).ExpireOldBans();
@@ -120,7 +120,7 @@ public class R2_IpHistoryConsistencyTests
 
         // enough refreshes for: delta reads, the prune sweep, and a confirmed checksum mismatch (needs two checks)
         for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2 + 2; i++)
-            await cache.RefreshCacheAsync(config, null, default);
+            await cache.RefreshCacheAsync(config, default);
 
         using var rebuilt = await Rebuild(config);
         Assert.Equal(Observe(rebuilt, config, now), Observe(cache, config, now));
@@ -145,12 +145,12 @@ public class R2_IpHistoryConsistencyTests
         await AddBan(db, 2, now);
         await AddIp(db, 2, "10.0.0.2", now.AddDays(-400));
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
         Assert.True(cache.CheckBan(config, 1, "10.0.0.2", now).IsBanned); // kept indefinitely when expiry is off
 
         await Exec(db, "DELETE FROM sa_players_ips");
         for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2 + 2; i++)
-            await cache.RefreshCacheAsync(config, null, default);
+            await cache.RefreshCacheAsync(config, default);
 
         Assert.False(cache.CheckBan(config, 1, "10.0.0.2", now).IsBanned);
         Assert.Equal(0, cache.Snapshot.IpAddressCount);
@@ -166,8 +166,8 @@ public class R2_IpHistoryConsistencyTests
         await AddBan(db, 2, now);
         await AddIp(db, 2, "10.0.0.2", now.AddDays(-4000));
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
-        for (var i = 0; i < 40; i++) await cache.RefreshCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
+        for (var i = 0; i < 40; i++) await cache.RefreshCacheAsync(config, default);
 
         Assert.True(cache.CheckBan(config, 1, "10.0.0.2", now).IsBanned);
         Assert.Equal(1, cache.Snapshot.IpAddressCount);
@@ -181,14 +181,14 @@ public class R2_IpHistoryConsistencyTests
         var config = Config(engine);
         var now = DateTime.UtcNow;
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
         for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 3; i++)
         {
             // stamped by the database clock, as the plugin's own upsert does (CURRENT_TIMESTAMP); a literal UTC time would be
             // hours behind a MySQL server in another time zone and legitimately invisible to the incremental reader
             await Exec(db, "INSERT INTO sa_players_ips(steamid,address,name,used_at) VALUES (@steam,@ip,'n',CURRENT_TIMESTAMP)",
                 new { steam = (ulong)(100 + i), ip = IpHelper.IpToUint($"10.1.0.{i % 200 + 1}") });
-            await cache.RefreshCacheAsync(config, null, default);
+            await cache.RefreshCacheAsync(config, default);
         }
 
         Assert.Equal(0, cache.IpRebuilds);

@@ -132,18 +132,20 @@ Configure automatic actions when players reach warning thresholds:
 
 **Example:** Automatically ban a player for 60 minutes when they receive their 3rd warning.
 
-### Multi-Server Mode
-
-Enable if you're running multiple servers with a shared database:
+### Multi-Server Mode (deprecated)
 
 ```json
 "MultiServerMode": true
 ```
 
-When enabled:
-- Bans are shared across all servers
-- Admin permissions can be global or server-specific
-- Player data is synchronized
+Penalties (bans, mutes, gags, silences, warns) are **always** shared across every server that uses the same database,
+whatever this setting says; an old config with `false` behaves like `true`. `server_id` is only stored as information about
+where a penalty was issued. Admin permissions and groups keep their own per-server scope. See
+[GLOBAL_PENALTIES.md](https://github.com/koiie111/CS2-SimpleAdmin/blob/main/docs/GLOBAL_PENALTIES.md).
+
+Related `OtherSettings`:
+- `UnverifiedConnectionTimeoutSeconds` (default `45`, 10-600): a connection whose ban/mute state cannot be read in time is disconnected; nothing is written for it.
+- `GagAllowedChatCommands` (default `[]`): command names a gagged/silenced player may still run with a chat trigger (`!rank`).
 
 ### Discord Integration
 
@@ -365,7 +367,7 @@ This allows you to:
 
 ### Multi-Server Setup
 
-1. **Enable MultiServerMode** - Share data across servers
+1. **Share one database** - penalties are network-wide automatically (`MultiServerMode` is ignored)
 2. **Use MySQL** - Required for multi-server
 3. **Configure server IDs** - Each server gets a unique ID automatically
 4. **Test penalties** - Ensure bans work across all servers

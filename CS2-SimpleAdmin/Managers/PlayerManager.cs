@@ -36,11 +36,20 @@ internal class PlayerManager
         long Revision = 0);
 
     /// <summary>
+    /// How long a connection may stay unverified (its ban/mute state could not be read) before it is disconnected.
+    /// Counted from the moment the SteamID is known. An unreadable database, a full queue, a plugin that is not ready or
+    /// an unfinished authorization are never proof that a player is unpunished; they only delay the check, and the delay
+    /// is bounded.
+    /// </summary>
+    internal static TimeSpan VerificationTimeout(CS2_SimpleAdminConfig config) =>
+        TimeSpan.FromSeconds(Math.Clamp(config.OtherSettings.UnverifiedConnectionTimeoutSeconds, 10, 600));
+
+    /// <summary>
     /// Loads and initializes player data when a client connects (game thread).
-    /// OnClientConnected and player_connect_full of the same connection share one session and one load.
+    /// OnClientConnected, OnClientAuthorized and player_connect_full of the same connection share one session and one load.
     /// </summary>
     /// <param name="player">The connecting player.</param>
-    /// <param name="fullConnect">Kept for API compatibility; both connect events lead to the same single load.</param>
+    /// <param name="fullConnect">Kept for API compatibility; all connect events lead to the same single load.</param>
     public void LoadPlayerData(CCSPlayerController player, bool fullConnect = false)
     {
         if (!player.UserId.HasValue)
@@ -60,9 +69,18 @@ internal class PlayerManager
             player.Rename(renamedTo);
         }
 
-        var session = Runtime.Sessions.BeginOrGet(player.Slot, steamId, player.UserId.Value, playerName, ipAddress, out _);
-        // connect + player_connect_full of one connection share one load; a load that failed is retried by its own
-        // backoff timer, not by the next connect event
+        var session = Runtime.Sessions.BeginOrGet(player.Slot, steamId, player.UserId.Value, playerName, ipAddress, out var created);
+
+        // Authorization is not finished: nothing can be verified for SteamID 0, and "no record" would mean nothing. A later
+        // connect event (OnClientAuthorized / player_connect_full) brings the real SteamID and starts the verified session.
+        if (steamId == 0) return;
+
+        // The verification deadline belongs to the session: whatever happens to the database, the connection is either
+        // verified by then or disconnected
+        if (created) ScheduleVerificationDeadline(session);
+
+        // connect + authorized + player_connect_full of one connection share one load; a load that failed is retried by
+        // its own backoff timer, not by the next connect event
         if (session.LoadState != ConnectLoadState.Pending)
         {
             Interlocked.Increment(ref PluginMetrics.ConnectDeduplicated);
@@ -84,6 +102,39 @@ internal class PlayerManager
     internal static Action<TimeSpan, Action> RetryScheduler { get; set; } =
         (delay, callback) => CS2_SimpleAdmin.Instance.AddTimer((float)delay.TotalSeconds, callback);
 
+    /// <summary>Game thread: disconnect an unverified connection (seam; production kicks the controller).</summary>
+    internal static Action<PlayerSession, string> KickUnverified { get; set; } = static (session, reason) =>
+    {
+        if (ResolveController(session) is { } player)
+            Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_INVALIDCONNECTION);
+    };
+
+    internal void ScheduleVerificationDeadline(PlayerSession session)
+    {
+        var timeout = VerificationTimeout(CS2_SimpleAdmin.CurrentConfig);
+        var context = Runtime.Context;
+        RetryScheduler(timeout, () =>
+        {
+            if (context.IsCurrent) EnforceVerificationDeadline(session);
+        });
+    }
+
+    /// <summary>
+    /// Game thread. The deadline of <paramref name="session"/> arrived: a connection that is still current and still not
+    /// <see cref="ConnectLoadState.Loaded"/> has not been checked against the shared penalty state and is disconnected.
+    /// Nothing is written to the database for it (no ban or mute for an unavailable database).
+    /// </summary>
+    internal static void EnforceVerificationDeadline(PlayerSession session)
+    {
+        if (!Runtime.Sessions.IsCurrent(session) || session.LoadState == ConnectLoadState.Loaded) return;
+        Interlocked.Increment(ref PluginMetrics.UnverifiedKicked);
+        CS2_SimpleAdmin._logger?.LogWarning(
+            "Disconnecting {Session}: ban/mute state could not be verified within the deadline (load state {State}, {Attempts} attempts, " +
+            "plugin state {Plugin}, last error: {Error}). No penalty was written for it.",
+            session, session.LoadState, session.LoadAttempts, Runtime.State, session.LastLoadError ?? Runtime.LastError ?? "none");
+        KickUnverified(session, "verification deadline");
+    }
+
     /// <summary>
     /// Game thread: starts loads for sessions that are waiting for one: connected while the plugin was starting
     /// (<see cref="ConnectLoadState.Pending"/>) or whose retry is due (<see cref="ConnectLoadState.RetryWait"/>).
@@ -95,8 +146,11 @@ internal class PlayerManager
         Runtime.Sessions.Snapshot(sessions);
         var now = Stopwatch.GetTimestamp();
         foreach (var session in sessions)
+        {
+            if (session.SteamId == 0) continue;
             if (session.LoadState is ConnectLoadState.Pending or ConnectLoadState.RetryWait)
                 QueueLoad(session, now);
+        }
     }
 
     /// <summary>
@@ -145,6 +199,7 @@ internal class PlayerManager
             return;
         }
 
+        session.LastLoadError = reason;
         if (!session.FailLoad(attempt, Stopwatch.GetTimestamp(), out var delay)) return;
         Interlocked.Increment(ref PluginMetrics.ConnectLoadRetries);
         RateLimitedLog.Warning("connect.load-failed",
@@ -178,22 +233,22 @@ internal class PlayerManager
         long revision, CancellationToken ct)
     {
         var start = LatencyHistogram.Now();
-        var plugin = CS2_SimpleAdmin.Instance;
         var other = config.OtherSettings;
-        var serverId = CS2_SimpleAdmin.ServerId;
+        var provider = CS2_SimpleAdmin.DatabaseProvider ?? throw new InvalidOperationException("no database");
 
-        // Save ip address before ban check. Always, not only for CheckMultiAccountsByIp: the site builds
-        // mirror transition stats (and partner/referral antifraud) from sa_players_ips.
-        if (session.IpAddress != null)
-            await SavePlayerIpAddress(session.SteamId, session.Name, session.IpAddress, ct).ConfigureAwait(false);
+        // The site builds mirror transition stats (and partner/referral antifraud) from sa_players_ips, so the address is
+        // saved for every connection. It is its own best-effort job: its latency or failure never delays the ban decision
+        // or the disconnect (and never turns into "banned" or "not banned").
+        QueueIpSave(session);
 
         var now = Time.ActualDateTime();
-        var check = cache.CheckBan(config, session.SteamId, session.IpAddress, now);
+        // The decision comes from the shared database by SteamID; the local cache only adds IP candidates
+        var check = await BanDecider.DecideAsync(provider, cache, config, session.SteamId, session.IpAddress, now, ct).ConfigureAwait(false);
         if (check.IsBanned)
         {
             CS2_SimpleAdmin._logger?.LogInformation("[BAN CHECK] Player {Name} ({SteamId}) IP: {Ip} is banned (ban #{BanId}, {Match}) - kicking",
                 session.Name, session.SteamId, session.IpAddress, check.Ban?.Id, check.Match);
-            QueuePlayerDataUpdate(config, serverId, session, check, cache);
+            QueuePlayerDataUpdate(config, session, check, cache);
             await Runtime.OnGameThread(() =>
             {
                 if (!ControllerAvailable(session))
@@ -228,15 +283,68 @@ internal class PlayerManager
             foreach (var account in cache.GetAccountsByIp(session.IpAddress, now, other.ExpireOldIpBans))
                 accounts.Add((account.SteamId, account.PlayerName));
 
-        var stats = await plugin.MuteManager.GetPlayerPenaltyStatsAsync(session.SteamId, config.MultiServerMode, serverId, ct)
+        // A failed read throws (retried, bounded by the verification deadline); it is never an empty "no mutes"
+        var mutes = await CS2_SimpleAdmin.Instance.MuteManager.GetActiveMutesAsync(session.SteamId, other.TimeMode, now, ct)
             .ConfigureAwait(false);
-        var mutes = await plugin.MuteManager.GetActiveMutesAsync(session.SteamId, config.MultiServerMode, other.TimeMode,
-            serverId, now, ct).ConfigureAwait(false);
 
-        var result = new LoadResult(false, stats, mutes, accounts, revision);
+        // Statistics are cosmetic (admin notice, counters): they are loaded after the restrictions are in force
+        var result = new LoadResult(false, new PlayerPenaltyStats(), mutes, accounts, revision);
         await Runtime.OnGameThread(() => ApplyLoadResult(session, attempt, result, config)).ConfigureAwait(false);
         PluginMetrics.ConnectLoad.RecordSince(start);
+
+        QueueStatsLoad(session, config);
     }
+
+    /// <summary>Best-effort: save the connection's IP once per session, as its own job.</summary>
+    private static void QueueIpSave(PlayerSession session)
+    {
+        if (session.IpAddress == null || session.IpSaved) return;
+        Runtime.TryQueueDb("connect-ip", async ct =>
+        {
+            if (await SavePlayerIpAddress(session.SteamId, session.Name, session.IpAddress, ct).ConfigureAwait(false))
+                session.IpSaved = true;
+        });
+    }
+
+    /// <summary>Best-effort: historic totals for the player's counters and the admin notice. Failure leaves them at 0.</summary>
+    private static void QueueStatsLoad(PlayerSession session, CS2_SimpleAdminConfig config)
+    {
+        Runtime.TryQueueDb("connect-stats", async ct =>
+        {
+            PlayerPenaltyStats stats;
+            try
+            {
+                stats = await CS2_SimpleAdmin.Instance.MuteManager.GetPlayerPenaltyStatsAsync(session.SteamId, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RateLimitedLog.Warning("connect.stats", $"Penalty statistics of {session} unavailable (restrictions are already applied): {ex.Message}");
+                return;
+            }
+
+            await Runtime.OnGameThread(() => ApplyStats(session, stats, config.OtherSettings.NotifyPenaltiesToAdminOnConnect))
+                .ConfigureAwait(false);
+        });
+    }
+
+    /// <summary>Game thread: fills the counters of a loaded player and sends the admin notice, if the connection is still the same.</summary>
+    internal static void ApplyStats(PlayerSession session, PlayerPenaltyStats stats, bool notifyAdmins)
+    {
+        if (!Runtime.Sessions.IsCurrent(session)) return;
+        if (!CS2_SimpleAdmin.PlayersInfo.TryGetValue(session.SteamId, out var info) || info.Slot != session.Slot) return;
+        info.TotalBans = (int)stats.TotalBans;
+        info.TotalMutes = (int)stats.TotalMutes;
+        info.TotalGags = (int)stats.TotalGags;
+        info.TotalSilences = (int)stats.TotalSilences;
+        info.TotalWarns = (int)stats.TotalWarns;
+        if (notifyAdmins) NotifyAdminsEffect(session, info);
+    }
+
+    /// <summary>Game thread: the admin notice about a player's history (seam).</summary>
+    internal static Action<PlayerSession, PlayerInfo> NotifyAdminsEffect { get; set; } = static (session, info) =>
+    {
+        if (ResolveController(session) is { } player) NotifyAdmins(player, info);
+    };
 
     /// <summary>Game thread. Applies a connect load if the connection is still current.</summary>
     internal static void ApplyLoadResult(PlayerSession session, int attempt, LoadResult result, CS2_SimpleAdminConfig config)
@@ -278,20 +386,20 @@ internal class PlayerManager
             switch (mute.Type)
             {
                 case "GAG":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Gag, ends, mute.Duration, result.Revision);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Gag, ends, mute.Duration, result.Revision, mute.Id);
                     break;
                 case "MUTE":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Mute, ends, mute.Duration, result.Revision);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Mute, ends, mute.Duration, result.Revision, mute.Id);
                     voiceMuted = true;
                     break;
                 default:
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Silence, ends, mute.Duration, result.Revision);
+                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Silence, ends, mute.Duration, result.Revision, mute.Id);
                     voiceMuted = true;
                     break;
             }
         }
 
-        NativeEffects(session, info, voiceMuted, config.OtherSettings.NotifyPenaltiesToAdminOnConnect);
+        NativeEffects(session, info, voiceMuted, false);
     }
 
     // ---- the only places where a load result touches the engine; seams so the state logic is testable without a server ----
@@ -299,17 +407,17 @@ internal class PlayerManager
     /// <summary>Game thread: is the controller of this session resolvable right now?</summary>
     internal static Func<PlayerSession, bool> ControllerAvailable { get; set; } = static session => ResolveController(session) != null;
 
-    /// <summary>Game thread: voice flags and the admin notice for a freshly loaded player.</summary>
+    /// <summary>Game thread: voice flags (and, legacy, the admin notice) for a freshly loaded player. Only the Muted bit is touched.</summary>
     internal static Action<PlayerSession, PlayerInfo, bool, bool> NativeEffects { get; set; } =
         static (session, info, voiceMuted, notifyAdmins) =>
         {
             var player = ResolveController(session);
             if (player == null) return;
-            if (voiceMuted) player.VoiceFlags = VoiceFlags.Muted;
+            if (voiceMuted) player.VoiceFlags |= VoiceFlags.Muted;
             if (notifyAdmins) NotifyAdmins(player, info);
         };
 
-    /// <summary>Game thread: kick a connection that the ban cache rejected.</summary>
+    /// <summary>Game thread: kick a connection that the ban check rejected.</summary>
     internal static Action<PlayerSession> KickBanned { get; set; } = static session =>
     {
         if (ResolveController(session) is { } player)
@@ -358,14 +466,14 @@ internal class PlayerManager
         return player;
     }
 
-    private static void QueuePlayerDataUpdate(CS2_SimpleAdminConfig config, int? serverId, PlayerSession session,
+    private static void QueuePlayerDataUpdate(CS2_SimpleAdminConfig config, PlayerSession session,
         BanCheckResult check, CacheManager cache)
     {
         var multi = config.OtherSettings.BanType != 0 && config.OtherSettings.CheckMultiAccountsByIp;
         if (!CacheManager.NeedsPlayerDataUpdate(check, multi, session.IpAddress)) return;
         // Best effort back-fill; dropping it under load only delays filling the ban row's name/IP
         Runtime.TryQueueDb("ban-backfill", ct =>
-            cache.UpdatePlayerDataAsync(config, serverId, session.Name, session.SteamId, session.IpAddress, ct));
+            cache.UpdatePlayerDataAsync(config, session.Name, session.SteamId, session.IpAddress, ct));
     }
 
     /// <summary>
@@ -379,8 +487,8 @@ internal class PlayerManager
         try
         {
             await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync();
-            var sql = CS2_SimpleAdmin.DatabaseProvider.GetPenaltyHistoryQuery(CS2_SimpleAdmin.Instance.Config.MultiServerMode);
-            var rows = (await connection.QueryAsync(sql, new { PlayerSteamID = steamId, serverid = CS2_SimpleAdmin.ServerId })).ToList();
+            var sql = CS2_SimpleAdmin.DatabaseProvider.GetPenaltyHistoryQuery();
+            var rows = (await connection.QueryAsync(sql, new { PlayerSteamID = steamId })).ToList();
 
             if (type != null)
                 rows.RemoveAll(r => !type.Equals((string)r.type + "s", StringComparison.OrdinalIgnoreCase));
@@ -404,18 +512,18 @@ internal class PlayerManager
     /// Runs on a DB worker. <paramref name="page"/> is 1-based.
     /// </summary>
     internal static async Task<HistoryPage> GetPenaltyHistoryPage(ulong steamId, string? type, int page, int pageSize,
-        bool multiServer, int? serverId, CancellationToken ct)
+        CancellationToken ct)
     {
         var provider = CS2_SimpleAdmin.DatabaseProvider ?? throw new InvalidOperationException("no database");
         var muteType = Database.SharedQueries.Parts(type).MuteType;
         await using var connection = await provider.CreateConnectionAsync(ct).ConfigureAwait(false);
         var total = Convert.ToInt32(await connection.ExecuteScalarAsync<object>(new CommandDefinition(
-            provider.GetPenaltyHistoryCountQuery(multiServer, type),
-            new { PlayerSteamID = steamId, serverid = serverId, muteType }, cancellationToken: ct)).ConfigureAwait(false));
+            provider.GetPenaltyHistoryCountQuery(type),
+            new { PlayerSteamID = steamId, muteType }, cancellationToken: ct)).ConfigureAwait(false));
         page = Math.Max(1, page);
         var rows = (await connection.QueryAsync<PenaltyHistoryRow>(new CommandDefinition(
-            provider.GetPenaltyHistoryPageQuery(multiServer, type),
-            new { PlayerSteamID = steamId, serverid = serverId, muteType, limit = pageSize, offset = (page - 1) * pageSize },
+            provider.GetPenaltyHistoryPageQuery(type),
+            new { PlayerSteamID = steamId, muteType, limit = pageSize, offset = (page - 1) * pageSize },
             cancellationToken: ct)).ConfigureAwait(false)).AsList();
         return new HistoryPage(total, page, pageSize, rows);
     }
@@ -460,12 +568,12 @@ internal class PlayerManager
     }
 
     /// <summary>
-    /// Saves player's IP address to the database for multi-account detection.
-    /// This is called before ban checks to ensure IP is recorded even if player is banned.
+    /// Saves the player's IP address to the database (site statistics, multi-account detection). Returns whether it was
+    /// written; a failure is logged and never propagates (it is not part of the enforcement decision).
     /// </summary>
-    private static async Task SavePlayerIpAddress(ulong steamId, string playerName, string ipAddress, CancellationToken ct)
+    private static async Task<bool> SavePlayerIpAddress(ulong steamId, string playerName, string ipAddress, CancellationToken ct)
     {
-        if (CS2_SimpleAdmin.DatabaseProvider == null) return;
+        if (CS2_SimpleAdmin.DatabaseProvider == null) return false;
 
         try
         {
@@ -476,10 +584,12 @@ internal class PlayerManager
                 playerName,
                 IPAddress = IpHelper.IpToUint(ipAddress)
             }, cancellationToken: ct)).ConfigureAwait(false);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             RateLimitedLog.Error("connect.save-ip", ex, $"Unable to save ip address for {playerName}");
+            return false;
         }
     }
 

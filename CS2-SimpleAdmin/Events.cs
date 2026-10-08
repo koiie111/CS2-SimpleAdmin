@@ -44,6 +44,7 @@ public partial class CS2_SimpleAdmin
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         RegisterListener<Listeners.OnClientConnected>(OnClientConnected);
+        RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
         RegisterListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
         if (Config.OtherSettings.UserMessageGagChatType)
             HookUserMessage(118, HookUmChat);
@@ -59,6 +60,7 @@ public partial class CS2_SimpleAdmin
         RemoveListener<Listeners.OnMapStart>(OnMapStart);
         RemoveListener<Listeners.OnClientConnect>(OnClientConnect);
         RemoveListener<Listeners.OnClientConnected>(OnClientConnected);
+        RemoveListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
         RemoveListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
         if (Config.OtherSettings.UserMessageGagChatType)
             UnhookUserMessage(118, HookUmChat);
@@ -199,6 +201,24 @@ public partial class CS2_SimpleAdmin
         PlayerManager.LoadPlayerData(player);
     }
     
+    /// <summary>
+    /// The earliest point at which the connection's SteamID64 is confirmed. The listener cannot veto the handshake (it
+    /// returns void in CounterStrikeSharp 1.0.369): the ban state is read from the shared database right away and a
+    /// banned connection is disconnected as soon as that answer arrives, i.e. a few milliseconds to a few seconds after
+    /// authorization, not before the network handshake completes.
+    /// </summary>
+    private void OnClientAuthorized(int playerslot, SteamID steamId)
+    {
+        var player = Utilities.GetPlayerFromSlot(playerslot);
+        if (player == null || !player.IsValid || player.IsBot || player.IsHLTV) return;
+        if (steamId.SteamId64 == 0 || player.SteamID != steamId.SteamId64) return; // player_connect_full starts the load then
+
+        if (!CachedPlayers.Contains(player))
+            CachedPlayers.Add(player);
+
+        PlayerManager.LoadPlayerData(player);
+    }
+
     private void OnClientConnected(int playerslot)
     {
 #if DEBUG
@@ -297,6 +317,15 @@ public partial class CS2_SimpleAdmin
         return HookResult.Continue;
     }
     
+    /// <summary>
+    /// Second line of defence (UserMessageGagChatType): a chat user message (SayText2, 118) whose author is gagged or
+    /// silenced is dropped, whatever produced it. The primary barrier is <see cref="CommandListenerCore"/>, which stops the
+    /// line before the engine publishes it; this hook only matters for text that reaches the chat by another route, for
+    /// example a chat-processor plugin re-sending the author's text. It needs nothing but the penalty state: a missing
+    /// localizer or end date never lets text through. Limits: a plugin that prints the text without a SayText2 carrying the
+    /// author (plain PrintToChat of a formatted string) is invisible to it, and a listener of another plugin that runs
+    /// before ours on the same line has already acted when we see it.
+    /// </summary>
     private HookResult HookUmChat(UserMessage um)
     {
         var author = Utilities.GetPlayerFromIndex(um.ReadInt("entityindex"));
@@ -307,27 +336,11 @@ public partial class CS2_SimpleAdmin
         if (!PlayerPenaltyManager.HasAnyPenalty(author.Slot, PenaltyType.Gag, PenaltyType.Silence))
             return HookResult.Continue;
 
-        if (!PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Gag, out DateTime? endDateTime) &&
-            !PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Silence, out endDateTime))
-            return HookResult.Continue;
-    
-        if (_localizer == null || endDateTime == null)
+        if (!PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Gag, out _) &&
+            !PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Silence, out _))
             return HookResult.Continue;
 
-        var message = um.ReadString("param2");
-        if (!ChatTriggers.StartsWithTrigger(message)) return HookResult.Stop;
-        
-        for (var i = um.Recipients.Count - 1; i >= 0; i--)
-        {
-            if (um.Recipients[i] != author)
-            {
-                um.Recipients.RemoveAt(i);
-            }
-        }
-        
-        return HookResult.Continue;
-
-        // author.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", author.GetLanguage()));
+        return HookResult.Stop;
     }
 
     private HookResult ComamndListenerHandler(CCSPlayerController? player, CommandInfo info)
@@ -380,18 +393,10 @@ public partial class CS2_SimpleAdmin
             return !player.CanTarget(target) ? HookResult.Stop : HookResult.Continue;
         }
 
-        if (command.IndexOf("say", StringComparison.OrdinalIgnoreCase) < 0)
+        if (!ChatGate.IsSayLike(command))
             return HookResult.Continue;
 
         var text = info.GetArg(1);
-        if (text.Length == 0)
-            return HookResult.Stop;
-
-        var startsWithTrigger = ChatTriggers.StartsWithTrigger(text);
-
-        // Not gagged: a trigger message is a normal command / chat line, let it through untouched
-        if (startsWithTrigger && !PlayerPenaltyManager.HasAnyPenalty(player.Slot, PenaltyType.Gag, PenaltyType.Silence))
-            return HookResult.Continue;
 
         var checkStart = LatencyHistogram.Now();
         DateTime? endDateTime = null;
@@ -399,25 +404,23 @@ public partial class CS2_SimpleAdmin
                      (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out endDateTime) ||
                       PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out endDateTime));
         PluginMetrics.ChatPenaltyCheck.RecordSince(checkStart);
-        if (!gagged && startsWithTrigger)
-            return HookResult.Continue;
 
-        if (gagged)
+        var decision = ChatGate.Decide(command, text, gagged, ChatTriggers.Current,
+            name => GagChatCommands.IsAllowed(name, Config.OtherSettings.GagAllowedChatCommands));
+        switch (decision.Verdict)
         {
-            // "!text" / "/text" used to skip this check and rely on HookUmChat to hide the line, which does not hold when
-            // another plugin formats and broadcasts chat. A gagged player's trigger message is never passed on: a
-            // command-shaped one is executed here silently, anything else is dropped.
-            if (startsWithTrigger)
-            {
-                var silentCommand = ChatTriggers.ToSilentCommand(text);
-                if (silentCommand != null)
-                    player.ExecuteClientCommandFromServer(silentCommand);
+            case ChatVerdict.Block:
                 return HookResult.Stop;
-            }
-
-            if (_localizer != null && endDateTime is not null)
-                player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
-            return HookResult.Stop;
+            case ChatVerdict.BlockAndNotify:
+                // Notice only when there is something to tell; the line is dropped either way
+                if (_localizer != null && endDateTime is not null)
+                    player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
+                return HookResult.Stop;
+            case ChatVerdict.RunCommand:
+                // The line is dropped before the engine's chat handler (which would publish it and dispatch the command); the
+                // allow-listed command runs here once, as the player, with the usual permission and argument checks
+                player.ExecuteClientCommandFromServer(decision.Command!);
+                return HookResult.Stop;
         }
 
         if (text[0] != '@') return HookResult.Continue;
@@ -470,46 +473,6 @@ public partial class CS2_SimpleAdmin
 
 		return HookResult.Continue;
 	}*/
-
-    public HookResult OnCommandTeamSay(CCSPlayerController? player, CommandInfo info)
-    {
-        if (player == null || !player.IsValid || player.IsBot)
-            return HookResult.Continue;
-
-        if (info.GetArg(1).StartsWith($"/")
-            || info.GetArg(1).StartsWith($"!"))
-            return HookResult.Continue;
-
-        if (info.GetArg(1).Length == 0)
-            return HookResult.Handled;
-
-        if (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out _) || PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out _))
-            return HookResult.Stop;
-
-        if (!info.GetArg(1).StartsWith($"@")) return HookResult.Continue;
-
-        StringBuilder sb = new();
-
-        if (AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))
-        {
-            sb.Append(_localizer!["sa_adminchat_template_admin", player.PlayerName, info.GetArg(1).Remove(0, 1)]);
-            foreach (var p in Utilities.GetPlayers().Where(p => p.IsValid && p is { IsBot: false, IsHLTV: false } && AdminManager.PlayerHasPermissions(new SteamID(p.SteamID), "@css/chat")))
-            {
-                p.PrintToChat(sb.ToString());
-            }
-        }
-        else
-        {
-            sb.Append(_localizer!["sa_adminchat_template_player", player.PlayerName, info.GetArg(1).Remove(0, 1)]);
-            player.PrintToChat(sb.ToString());
-            foreach (var p in Utilities.GetPlayers().Where(p => p is { IsValid: true, IsBot: false, IsHLTV: false } && AdminManager.PlayerHasPermissions(new SteamID(p.SteamID), "@css/chat")))
-            {
-                p.PrintToChat(sb.ToString());
-            }
-        }
-
-        return HookResult.Handled;
-    }
 
     private void OnMapStart(string mapName)
     {

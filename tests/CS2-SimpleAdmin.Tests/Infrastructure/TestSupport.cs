@@ -128,10 +128,16 @@ internal sealed class FlakyQueriesProvider(IDatabaseProvider inner) : FakeProvid
         return inner.CreateConnectionAsync(cancellationToken);
     }
 
-    public override string GetPlayerPenaltyStatsQuery(bool multiServer) => FailStats ? Broken : inner.GetPlayerPenaltyStatsQuery(multiServer);
-    public override string GetIsMutedQuery(bool multiServer, int timeMode) => FailMutes ? Broken : inner.GetIsMutedQuery(multiServer, timeMode);
-    public override string GetExpiredOnlineMutesBatchQuery(bool multiServer) => FailExpiredRead ? Broken : inner.GetExpiredOnlineMutesBatchQuery(multiServer);
-    public override string GetOnlineCreditPlanQuery(bool multiServer) => FailPlanRead ? Broken : inner.GetOnlineCreditPlanQuery(multiServer);
+    public override string GetPlayerPenaltyStatsQuery() => FailStats ? Broken : inner.GetPlayerPenaltyStatsQuery();
+    public override string GetIsMutedQuery(int timeMode) => FailMutes ? Broken : inner.GetIsMutedQuery(timeMode);
+    public override string GetActiveMutesBatchQuery(int timeMode) => FailMutes ? Broken : inner.GetActiveMutesBatchQuery(timeMode);
+    public volatile bool FailSteamBans;
+    public volatile bool FailIpSave;
+    public override string GetUpsertPlayerIpQuery() => FailIpSave ? Broken : inner.GetUpsertPlayerIpQuery();
+    public override string GetActiveSteamBansQuery() => FailSteamBans ? Broken : inner.GetActiveSteamBansQuery();
+    public override string GetActiveBansByIdsQuery() => inner.GetActiveBansByIdsQuery();
+    public override string GetExpiredOnlineMutesBatchQuery() => FailExpiredRead ? Broken : inner.GetExpiredOnlineMutesBatchQuery();
+    public override string GetOnlineCreditPlanQuery() => FailPlanRead ? Broken : inner.GetOnlineCreditPlanQuery();
     public override string GetApplyOnlineCreditQuery(IReadOnlyList<OnlineCreditStep> steps) => inner.GetApplyOnlineCreditQuery(steps);
     public override string GetAdminsQuery() => FailAdmins ? Broken : inner.GetAdminsQuery();
     public override string GetGroupsQuery() => FailGroups ? Broken : inner.GetGroupsQuery();

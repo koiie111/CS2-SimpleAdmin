@@ -244,7 +244,7 @@ When `CheckMultiAccountsByIp` is enabled:
 ### Player rejoins after ban
 
 **Check:**
-- Is `MultiServerMode` enabled if using multiple servers?
+- (`MultiServerMode` is ignored: bans always apply on every server of the shared database)
 - Is the database shared across servers?
 - Check ban type configuration (SteamID vs IP)
 

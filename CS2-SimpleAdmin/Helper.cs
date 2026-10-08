@@ -22,6 +22,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CounterStrikeSharp.API.Core.Plugin.Host;
 using CounterStrikeSharp.API.Modules.Entities.Constants;
+using CS2_SimpleAdmin.Infrastructure;
 using CS2_SimpleAdmin.Managers;
 using MenuManager;
 using ZLinq;
@@ -138,158 +139,86 @@ internal static class Helper
 
         if (player == null || !player.IsValid || player.IsHLTV)
             return;
-        
-        if (player.UserId.HasValue && CS2_SimpleAdmin.PlayersInfo.TryGetValue(player.SteamID, out var value))
-            value.WaitingForKick = true;
 
-        // player.CommitSuicide(true, true);
-        player.VoiceFlags = VoiceFlags.Muted;
-        var playerPawn = player.PlayerPawn.Value;
-
-        if (playerPawn != null && playerPawn.LifeState == (int)LifeState_t.LIFE_ALIVE)
-        {
-            playerPawn.Freeze();
-            playerPawn.Colorize(255, 0, 0);
-            
-            var weaponServices = playerPawn.WeaponServices;
-            if (weaponServices == null)
-                return;
-
-            foreach (var _weap in weaponServices.MyWeapons)
-            {
-                var weapon = _weap.Value;;
-                if (weapon == null || !weapon.IsValid)
-                    continue;
-                if (weapon.DesignerName.Contains("c4") || weapon.DesignerName.Contains("healthshot"))
-                    continue;
-
-                weapon.NextPrimaryAttackTick = Server.TickCount + 999;
-                weapon.NextSecondaryAttackTick = Server.TickCount + 999;
-                Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextPrimaryAttackTick");
-                Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextSecondaryAttackTick");
-            }
-        }
-        
-        if (delay > 0)
-        {
-            CS2_SimpleAdmin.Instance.AddTimer(delay, () =>
-            {
-                if (!player.IsValid || player.IsHLTV)
-                    return;
-                
-                // Server.ExecuteCommand($"kickid {player.UserId}");
-
-                playerPawn?.Colorize();
-                player.Disconnect(reason);
-            });
-        }
-        else
-        {
-            // Server.ExecuteCommand($"kickid {player.UserId}");
-
-            playerPawn?.Colorize();
-            player.Disconnect(reason); 
-        }
-        
-        if (CS2_SimpleAdmin.UnlockedCommands && reason == NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED)
-            Server.ExecuteCommand($"banid 1 {new SteamID(player.SteamID).SteamId3}");
-
-        // if (!string.IsNullOrEmpty(reason))
-        // {
-        // 	var escapeChars = reason.IndexOfAny([';', '|']);
-        //
-        // 	if (escapeChars != -1)
-        // 	{
-        // 		reason = reason[..escapeChars];
-        // 	}
-        // }
-        //
-        // Server.ExecuteCommand($"kickid {userId} {reason}");
+        KickPlayer(player, reason, delay);
     }
-    
+
+    /// <summary>
+    /// Disconnects a player, now or after <paramref name="delay"/> seconds. The disconnect never depends on the player
+    /// having a pawn, being alive, having weapons/WeaponServices or on any visual effect succeeding (see
+    /// <see cref="KickFlow"/>); a delayed kick only reaches the connection it was ordered for.
+    /// </summary>
     public static void KickPlayer(CCSPlayerController player, NetworkDisconnectionReason reason = NetworkDisconnectionReason.NETWORK_DISCONNECT_KICKED, int delay = 0)
     {
         if (!player.IsValid || player.IsHLTV)
             return;
 
-        if (CS2_SimpleAdmin.PlayersInfo.TryGetValue(player.SteamID, out var value))
-        {
-            if (value.WaitingForKick)
-                return;
-            
-            value.WaitingForKick = true;
-        }
-        
-        player.VoiceFlags = VoiceFlags.Muted;
-        var playerPawn = player.PlayerPawn.Value;
-        if (playerPawn != null && playerPawn.LifeState == (int)LifeState_t.LIFE_ALIVE)
-        {
-            playerPawn.Freeze();
-            playerPawn.Colorize(255, 0, 0);
-
-            var weaponServices = playerPawn.WeaponServices;
-            if (weaponServices == null)
-                return;
-
-            foreach (var _weap in weaponServices.MyWeapons)
-            {
-                var weapon = _weap.Value;
-                ;
-                if (weapon == null || !weapon.IsValid)
-                    continue;
-                if (weapon.DesignerName.Contains("c4") || weapon.DesignerName.Contains("healthshot"))
-                    continue;
-
-                weapon.NextPrimaryAttackTick = Server.TickCount + 999;
-                weapon.NextSecondaryAttackTick = Server.TickCount + 999;
-                Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextPrimaryAttackTick");
-                Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextSecondaryAttackTick");
-            }
-        }
-
-        if (delay > 0)
-        {
-            CS2_SimpleAdmin.Instance.AddTimer(delay, () =>
-            {
-                if (!player.IsValid || player.IsHLTV)
-                    return;
-                
-                // if (!string.IsNullOrEmpty(reason))
-                // {
-                // 	var escapeChars = reason.IndexOfAny([';', '|']);
-                //
-                // 	if (escapeChars != -1)
-                // 	{
-                // 		reason = reason[..escapeChars];
-                // 	}
-                // }
-                //
-                // Server.ExecuteCommand($"kickid {player.UserId}");
-                player.Disconnect(reason);
-            });
-        }
-        else
-        {
-            // Server.ExecuteCommand($"kickid {player.UserId}");
-
-            player.Disconnect(reason);
-        }
-        
-        if (CS2_SimpleAdmin.UnlockedCommands && reason == NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED)
-            Server.ExecuteCommand($"banid 1 {new SteamID(player.SteamID).SteamId3}");
-
-        // if (!string.IsNullOrEmpty(reason))
-        // {
-        // 	var escapeChars = reason.IndexOfAny([';', '|']);
-        //
-        // 	if (escapeChars != -1)
-        // 	{
-        // 		reason = reason[..escapeChars];
-        // 	}
-        // }
-        //
-        // Server.ExecuteCommand($"kickid {userId} {reason}");
+        var target = new KickFlow.Target(player.Slot, player.UserId ?? -1, player.SteamID);
+        KickFlow.Run(target, reason, delay, ProductionKickOps);
     }
+
+    private static CCSPlayerController? ResolveKickTarget(KickFlow.Target target)
+    {
+        var player = Utilities.GetPlayerFromSlot(target.Slot);
+        return player is { IsValid: true, IsHLTV: false } && player.SteamID == target.SteamId && (player.UserId ?? -1) == target.UserId
+            ? player
+            : null;
+    }
+
+    private static readonly KickFlow.Ops ProductionKickOps = new()
+    {
+        MarkWaiting = static target =>
+        {
+            if (CS2_SimpleAdmin.PlayersInfo.TryGetValue(target.SteamId, out var info))
+                info.WaitingForKick = true;
+        },
+        IsKickPending = static target =>
+            CS2_SimpleAdmin.PlayersInfo.TryGetValue(target.SteamId, out var info) && info.WaitingForKick,
+        IsSameConnection = static target => ResolveKickTarget(target) != null,
+        Schedule = static (seconds, action) => CS2_SimpleAdmin.Instance.AddTimer(seconds, action),
+        Disconnect = static (target, reason) => ResolveKickTarget(target)?.Disconnect(reason),
+        BanId = static target =>
+        {
+            if (CS2_SimpleAdmin.UnlockedCommands)
+                Server.ExecuteCommand($"banid 1 {new SteamID(target.SteamId).SteamId3}");
+        },
+        Decorate = static target =>
+        {
+            var player = ResolveKickTarget(target);
+            if (player == null) return;
+
+            try { player.VoiceFlags |= VoiceFlags.Muted; } catch { /* decoration */ }
+
+            // No pawn, a dead or observing player, a pawn without WeaponServices: nothing to decorate, still kicked
+            var pawn = player.PlayerPawn.Value;
+            if (pawn == null || pawn.LifeState != (int)LifeState_t.LIFE_ALIVE) return;
+
+            try { pawn.Freeze(); } catch { /* decoration */ }
+            try { pawn.Colorize(255, 0, 0); } catch { /* decoration */ }
+
+            try
+            {
+                var weaponServices = pawn.WeaponServices;
+                if (weaponServices == null) return;
+                foreach (var handle in weaponServices.MyWeapons)
+                {
+                    var weapon = handle.Value;
+                    if (weapon == null || !weapon.IsValid) continue;
+                    if (weapon.DesignerName.Contains("c4") || weapon.DesignerName.Contains("healthshot")) continue;
+
+                    weapon.NextPrimaryAttackTick = Server.TickCount + 999;
+                    weapon.NextSecondaryAttackTick = Server.TickCount + 999;
+                    Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextPrimaryAttackTick");
+                    Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_nNextSecondaryAttackTick");
+                }
+            }
+            catch
+            {
+                // decoration only
+            }
+        },
+        OnError = static (step, ex) => CS2_SimpleAdmin._logger?.LogWarning("Kick step '{Step}' failed (the disconnect is not affected): {Error}", step, ex.Message)
+    };
 
     public static int ParsePenaltyTime(string time)
     {

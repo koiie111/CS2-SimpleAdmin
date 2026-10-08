@@ -237,6 +237,22 @@ public class OtherSettings
     
     [JsonPropertyName("UserMessageGagChatType")]
     public bool UserMessageGagChatType { get; set; } = false;
+
+    /// <summary>
+    /// Seconds a connection may stay unverified (ban/mute state not readable: database down, queue full, plugin not
+    /// ready) before it is disconnected. Nothing is written to the database for such a player. Clamped to 10..600.
+    /// </summary>
+    [JsonPropertyName("UnverifiedConnectionTimeoutSeconds")]
+    public int UnverifiedConnectionTimeoutSeconds { get; set; } = 45;
+
+    /// <summary>
+    /// Command names (without trigger and without the css_ prefix, e.g. "rank", "top") that a gagged/silenced player may
+    /// still run by typing a chat trigger ("!rank"). Only commands that never relay player text to other players belong
+    /// here. Everything else typed with a trigger by a gagged player is dropped. This plugin's own non-broadcasting
+    /// commands (css_admin, css_penalties, css_history, ...) are always allowed.
+    /// </summary>
+    [JsonPropertyName("GagAllowedChatCommands")]
+    public List<string> GagAllowedChatCommands { get; set; } = new();
     
     // fork: off by default. Players joining through mirrors share the mirror IP, so a single banned
     // account there would lock out everyone else (1.5.x checked bans by SteamID only).
@@ -275,6 +291,11 @@ public class CS2_SimpleAdminConfig : BasePluginConfig
         { 999, "css_ban #USERID 120 \"4/4 Warn\"" },
     };
 
+    /// <summary>
+    /// Deprecated and ignored for penalties: bans, mutes, gags, silences and warns are network-wide whatever this says
+    /// (an old config with false behaves like true). The property stays so existing config files still load. Admin rights
+    /// and groups keep their own per-server scope (sa_admins.server_id / sa_groups_servers).
+    /// </summary>
     [JsonPropertyName("MultiServerMode")]
     public bool MultiServerMode { get; set; } = true;
 

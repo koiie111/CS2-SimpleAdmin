@@ -31,6 +31,12 @@ internal sealed class PlayerSession(long id, int slot, ulong steamId, int userId
     /// <summary>Number of load attempts started for this connection.</summary>
     public int LoadAttempts { get; private set; }
 
+    /// <summary>Message of the last failed load attempt (diagnostics when the verification deadline expires).</summary>
+    public string? LastLoadError { get; set; }
+
+    /// <summary>The IP address of this connection was written to sa_players_ips (once per session).</summary>
+    public volatile bool IpSaved;
+
     /// <summary>Stopwatch timestamp from which the next attempt may start (while <see cref="ConnectLoadState.RetryWait"/>).</summary>
     public long NextLoadAttemptTimestamp { get; private set; }
 

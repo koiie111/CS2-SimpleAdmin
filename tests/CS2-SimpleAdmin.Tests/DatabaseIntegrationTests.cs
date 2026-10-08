@@ -61,7 +61,7 @@ public class DatabaseIntegrationTests
         await InsertBan(db, 76561198000000004, null, status: "EXPIRED");
 
         var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, 1, CancellationToken.None);
+        await cache.InitializeCacheAsync(config, CancellationToken.None);
         Assert.Equal(3, cache.Snapshot.ActiveCount); // only ACTIVE rows are kept
 
         await using (var c = await db.OpenAsync())
@@ -73,7 +73,7 @@ public class DatabaseIntegrationTests
         }
 
         var added = await InsertBan(db, 76561198000000005, "4.4.4.4");
-        await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
+        await cache.RefreshCacheAsync(config, CancellationToken.None);
 
         var s = cache.Snapshot;
         Assert.True(s.ActiveBans.ContainsKey(keep));
@@ -90,7 +90,7 @@ public class DatabaseIntegrationTests
         var config = Config(sqlite: db.IsSqlite);
         var id = await InsertBan(db, 76561198000000011, null);
         var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, 1, CancellationToken.None);
+        await cache.InitializeCacheAsync(config, CancellationToken.None);
 
         await using (var c = await db.OpenAsync())
         {
@@ -99,7 +99,7 @@ public class DatabaseIntegrationTests
                 new { id, old = new DateTime(2020, 1, 1) });
         }
 
-        await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
+        await cache.RefreshCacheAsync(config, CancellationToken.None);
         Assert.False(cache.Snapshot.ActiveBans.ContainsKey(id));
     }
 
@@ -109,7 +109,7 @@ public class DatabaseIntegrationTests
         await using var db = await TestDatabases.CreateAsync(engine);
         var config = Config(sqlite: db.IsSqlite);
         var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, 1, CancellationToken.None);
+        await cache.InitializeCacheAsync(config, CancellationToken.None);
 
         await using (var c = await db.OpenAsync())
         {
@@ -123,7 +123,7 @@ public class DatabaseIntegrationTests
             tx.Commit();
         }
 
-        await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
+        await cache.RefreshCacheAsync(config, CancellationToken.None);
         Assert.Equal(2500, cache.Snapshot.ActiveCount);
     }
 
@@ -137,7 +137,7 @@ public class DatabaseIntegrationTests
         await using var db = await TestDatabases.CreateAsync(engine);
         var config = Config(sqlite: db.IsSqlite);
         var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, 1, CancellationToken.None);
+        await cache.InitializeCacheAsync(config, CancellationToken.None);
 
         await using (var c = await db.OpenAsync())
         {
@@ -149,9 +149,9 @@ public class DatabaseIntegrationTests
             tx.Commit();
         }
 
-        await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
+        await cache.RefreshCacheAsync(config, CancellationToken.None);
         if (cache.Snapshot.IpAccountCount < 5000) // a pass reads a bounded number of pages; the next one continues
-            await cache.RefreshCacheAsync(config, 1, CancellationToken.None);
+            await cache.RefreshCacheAsync(config, CancellationToken.None);
         Assert.Equal(5000, cache.Snapshot.IpAccountCount);
         Assert.Equal(700, cache.Snapshot.IpAddressCount);
     }
@@ -163,10 +163,10 @@ public class DatabaseIntegrationTests
         var config = Config(sqlite: db.IsSqlite);
         var id = await InsertBan(db, 76561198000000021, null);
         var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, 1, CancellationToken.None);
+        await cache.InitializeCacheAsync(config, CancellationToken.None);
         var before = cache.Snapshot;
 
-        var reload = cache.ForceReInitializeCacheAsync(config, 1, CancellationToken.None);
+        var reload = cache.ForceReInitializeCacheAsync(config, CancellationToken.None);
         // Readers during the rebuild see a complete snapshot (old or new), never an empty/cleared one
         Assert.True(cache.Snapshot.ActiveBans.ContainsKey(id));
         await reload;
@@ -199,25 +199,22 @@ public class DatabaseIntegrationTests
         }
 
         var mutes = new MuteManager(db.Provider);
-        var thisServer = await mutes.GetPlayerPenaltyStatsAsync(steam, multiServer: false, serverId: 1, CancellationToken.None);
-        Assert.Equal((2, 1, 2, 0, 1), ((int)thisServer.TotalBans, (int)thisServer.TotalMutes, (int)thisServer.TotalGags,
-            (int)thisServer.TotalSilences, (int)thisServer.TotalWarns));
-        var all = await mutes.GetPlayerPenaltyStatsAsync(steam, multiServer: true, serverId: 1, CancellationToken.None);
-        Assert.Equal(3, all.TotalBans);
-        Assert.Equal(1, all.TotalSilences);
+        // Penalties are network-wide: the SILENCE and the EXPIRED ban issued on server 2 count as well
+        var all = await mutes.GetPlayerPenaltyStatsAsync(steam, CancellationToken.None);
+        Assert.Equal((3, 1, 2, 1, 1), ((int)all.TotalBans, (int)all.TotalMutes, (int)all.TotalGags, (int)all.TotalSilences, (int)all.TotalWarns));
 
         // F12: GetPlayerMutes used the unmute query (needs @pattern/@muteType), threw, and returned zeros
         await using (var c = await db.OpenAsync())
         {
             await Assert.ThrowsAnyAsync<Exception>(() => c.QuerySingleAsync<(int, int, int)>(
-                db.Provider.GetRetrieveMutesQuery(false), new { PlayerSteamID = steam, ServerId = 1 }));
+                db.Provider.GetRetrieveMutesQuery(), new { PlayerSteamID = steam }));
         }
 
         CS2_SimpleAdmin.GlobalServerId = 1;
         var stats = await mutes.GetPlayerMutes(new CS2_SimpleAdminApi.PlayerInfo(1, 1,
             new CounterStrikeSharp.API.Modules.Entities.SteamID(steam), "p", null));
         CS2_SimpleAdmin.GlobalServerId = null;
-        Assert.Equal((1, 2, 0), stats); // this server only (MultiServerMode=false)
+        Assert.Equal((1, 2, 1), stats); // every server, even with the legacy MultiServerMode=false
     }
 
     [Theory, MemberData(nameof(Engines))]
@@ -242,7 +239,7 @@ public class DatabaseIntegrationTests
         var pages = 0;
         for (var page = 1; ; page++)
         {
-            var result = await PlayerManager.GetPenaltyHistoryPage(steam, null, page, 50, true, 1, CancellationToken.None);
+            var result = await PlayerManager.GetPenaltyHistoryPage(steam, null, page, 50, CancellationToken.None);
             Assert.Equal(120, result.Total);
             foreach (var row in result.Rows) Assert.True(seen.Add((row.Type, row.Id)), $"duplicate {row.Type}#{row.Id}");
             pages++;
@@ -252,7 +249,7 @@ public class DatabaseIntegrationTests
         Assert.Equal(3, pages);
         Assert.Equal(120, seen.Count);
 
-        var gags = await PlayerManager.GetPenaltyHistoryPage(steam, "gags", 1, 100, true, 1, CancellationToken.None);
+        var gags = await PlayerManager.GetPenaltyHistoryPage(steam, "gags", 1, 100, CancellationToken.None);
         Assert.Equal(20, gags.Total);
         Assert.All(gags.Rows, r => Assert.Equal("GAG", r.Type));
     }
@@ -277,7 +274,7 @@ public class DatabaseIntegrationTests
         var mutes = new MuteManager(db.Provider);
         var windowEnd = DateTime.Now;
         var credits = players.Select(p => new OnlineCredit(p, 1, OnlineCredit.TicksPerMinute, windowEnd.AddMinutes(-1), windowEnd)).ToList();
-        var expired = await mutes.CheckOnlineModeMutesAsync(credits, true, 1, CancellationToken.None);
+        var expired = await mutes.CheckOnlineModeMutesAsync(credits, CancellationToken.None);
         var updates = await ComUpdate(db) - updatesBefore;
 
         Assert.Equal(50, expired.Count); // duration 1 reached after one credited minute

@@ -91,7 +91,7 @@ public partial class CS2_SimpleAdmin
         }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Gag, Time.ActualDateTime().AddMinutes(time), time);
+        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Gag, Time.ActualDateTime().AddMinutes(time), time, 0);
 
         // Determine message keys and arguments based on gag time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0
@@ -379,7 +379,7 @@ public partial class CS2_SimpleAdmin
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Set player's voice flags to muted
-        player.VoiceFlags = VoiceFlags.Muted;
+        player.VoiceFlags |= VoiceFlags.Muted;
 
         // Asynchronously handle mute logic
         if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
@@ -394,7 +394,7 @@ public partial class CS2_SimpleAdmin
         }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Mute, Time.ActualDateTime().AddMinutes(time), time);
+        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Mute, Time.ActualDateTime().AddMinutes(time), time, 0);
 
         // Determine message keys and arguments based on mute time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0
@@ -697,8 +697,8 @@ public partial class CS2_SimpleAdmin
         }, orderKey: playerInfo.SteamId.SteamId64)) return;
 
         // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Silence, Time.ActualDateTime().AddMinutes(time), time);
-        player.VoiceFlags = VoiceFlags.Muted;
+        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Silence, Time.ActualDateTime().AddMinutes(time), time, 0);
+        player.VoiceFlags |= VoiceFlags.Muted;
 
         // Determine message keys and arguments based on silence time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0

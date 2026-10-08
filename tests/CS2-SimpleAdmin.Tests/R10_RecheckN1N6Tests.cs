@@ -37,9 +37,9 @@ public class R10_RecheckN1N6Tests
                 await c.ExecuteAsync("INSERT INTO sa_players_ips(steamid,address,name,used_at) VALUES (@steam,@ip,'probe',@now)",
                     new { steam = RealSteamBase + i, ip = 167772161L + i, now = DateTime.UtcNow });
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
         for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes + 1; i++)
-            await cache.RefreshCacheAsync(config, null, default);
+            await cache.RefreshCacheAsync(config, default);
     }
 
     private static async Task InsertIps(TestDatabase db, int players, int ipsPerPlayer, long steamBase = RealSteamBase)
@@ -76,7 +76,7 @@ public class R10_RecheckN1N6Tests
                 c.OtherSettings.CheckMultiAccountsByIp = true; c.OtherSettings.ExpireOldIpBans = 30;
             });
             using var cache = new CacheManager();
-            await cache.InitializeCacheAsync(config, null, default);
+            await cache.InitializeCacheAsync(config, default);
             var cutoff = DateTime.UtcNow.AddDays(-30);
             var sql = await SqlChecksum(db, cutoff);
             Assert.Equal(players, sql.Item1);
@@ -97,7 +97,7 @@ public class R10_RecheckN1N6Tests
             c.OtherSettings.CheckMultiAccountsByIp = true; c.OtherSettings.ExpireOldIpBans = 30;
         });
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
         var cutoff = DateTime.UtcNow.AddDays(-30);
         var sql = await SqlChecksum(db, cutoff);
         Assert.Equal(900, sql.Item1);
@@ -129,8 +129,8 @@ public class R10_RecheckN1N6Tests
             c.OtherSettings.CheckMultiAccountsByIp = true; c.OtherSettings.ExpireOldIpBans = 30;
         });
         using var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, null, default);
-        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2; i++) await cache.RefreshCacheAsync(config, null, default);
+        await cache.InitializeCacheAsync(config, default);
+        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2; i++) await cache.RefreshCacheAsync(config, default);
         Assert.Equal(0, cache.IpRebuilds); // nothing differs: no false rebuild
 
         const string deletedIp = "10.0.0.1"; // 167772161 = player 0
@@ -138,7 +138,7 @@ public class R10_RecheckN1N6Tests
         await using (var c = await db.OpenAsync())
             await c.ExecuteAsync("DELETE FROM sa_players_ips WHERE steamid = @s", new { s = RealSteamBase });
 
-        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2; i++) await cache.RefreshCacheAsync(config, null, default);
+        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2; i++) await cache.RefreshCacheAsync(config, default);
         Assert.Equal(1, cache.IpRebuilds);
         Assert.Empty(cache.GetAccountsByIp(deletedIp, DateTime.UtcNow, 30));
     }
@@ -156,7 +156,7 @@ public class R10_RecheckN1N6Tests
             c.OtherSettings.CheckMultiAccountsByIp = true; c.OtherSettings.ExpireOldIpBans = 30;
         });
         using var refreshed = new CacheManager();
-        await refreshed.InitializeCacheAsync(config, null, default);
+        await refreshed.InitializeCacheAsync(config, default);
         await using (var c = await db.OpenAsync())
         {
             await c.ExecuteAsync("UPDATE sa_players_ips SET used_at = @t WHERE steamid < @s", new { t = DateTime.UtcNow.AddMinutes(1), s = RealSteamBase + 100 });
@@ -164,9 +164,9 @@ public class R10_RecheckN1N6Tests
             await c.ExecuteAsync("INSERT INTO sa_players_ips(steamid,address,name,used_at) VALUES (@s, 3232235777, 'new', @t)", new { s = RealSteamBase + 5000, t = DateTime.UtcNow });
         }
 
-        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2 + 1; i++) await refreshed.RefreshCacheAsync(config, null, default);
+        for (var i = 0; i < CacheManager.IpChecksumEveryRefreshes * 2 + 1; i++) await refreshed.RefreshCacheAsync(config, default);
         using var rebuilt = new CacheManager();
-        await rebuilt.InitializeCacheAsync(config, null, default);
+        await rebuilt.InitializeCacheAsync(config, default);
         var cutoff = DateTime.UtcNow.AddDays(-30);
         Assert.Equal(rebuilt.Snapshot.IpHistory.Checksum(cutoff), refreshed.Snapshot.IpHistory.Checksum(cutoff));
         Assert.Equal(await SqlChecksum(db, cutoff), refreshed.Snapshot.IpHistory.Checksum(cutoff));
@@ -492,7 +492,7 @@ public class R10_RecheckN1N6Tests
             var session = Runtime.Sessions.BeginOrGet(1, 76561198000000001, 1, "probe", null, out _);
             await using (var c = await db.OpenAsync())
                 await c.ExecuteAsync("INSERT INTO sa_bans(player_steamid,admin_steamid,admin_name,reason,duration,ends,created,status) VALUES (76561198000000001,0,'Console','probe',0,@now,@now,'ACTIVE')", new { now = DateTime.UtcNow });
-            await plugin.Plugin.CacheManager!.InitializeCacheAsync(config, null, default);
+            await plugin.Plugin.CacheManager!.InitializeCacheAsync(config, default);
             var fixture = new BanFixture { Db = db, World = world, Plugin = plugin, Session = session };
             PlayerManager.KickBanned = _ => Interlocked.Increment(ref fixture.Kicks);
             PlayerManager.RetryScheduler = (_, _) => Interlocked.Increment(ref fixture.Retries);
@@ -523,7 +523,7 @@ public class R10_RecheckN1N6Tests
         var session = Runtime.Sessions.BeginOrGet(1, 76561198000000001, 1, "probe", null, out _);
         await using (var c = await db.OpenAsync())
             await c.ExecuteAsync("INSERT INTO sa_bans(player_steamid,admin_steamid,admin_name,reason,duration,ends,created,status) VALUES (76561198000000001,0,'Console','probe',0,@now,@now,'ACTIVE')", new { now = DateTime.UtcNow });
-        await plugin.Plugin.CacheManager!.InitializeCacheAsync(config, null, default);
+        await plugin.Plugin.CacheManager!.InitializeCacheAsync(config, default);
         Assert.True(plugin.Plugin.CacheManager.CheckBan(config, session.SteamId, null, DateTime.UtcNow).IsBanned);
         PlayerManager.ControllerAvailable = _ => false;
         PlayerManager.RetryScheduler = (_, _) => { };

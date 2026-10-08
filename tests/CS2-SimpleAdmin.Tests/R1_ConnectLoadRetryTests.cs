@@ -79,8 +79,10 @@ public class R1_ConnectLoadRetryTests
     }
 
     [Fact]
-    public async Task StatsFailureThenRecoveryAppliesExactlyOnce()
+    public async Task StatsFailureDoesNotDelayOrCancelTheRestrictions()
     {
+        // The statistics (counters, admin notice) are cosmetic. b43a6b7 applied mutes despite a failing stats query, fbabb7a
+        // reverted it; the contract now is explicit: enforcement never waits for them, and a stats failure is not a failed load
         var (h, provider, db) = await WithDatabase();
         using var _h = h;
         await using var _db = db;
@@ -89,17 +91,32 @@ public class R1_ConnectLoadRetryTests
 
         h.Manager.QueueLoad(session, Stopwatch.GetTimestamp());
         await h.Settle(session);
-        Assert.Equal(ConnectLoadState.RetryWait, session.LoadState);
-        Assert.Empty(h.Applied);
 
-        provider.FailStats = false; // database recovers
-        h.Scheduled[^1].Callback();  // the backoff timer fires
-        await h.Settle(session);
-
-        Assert.Equal(ConnectLoadState.Loaded, session.LoadState);
+        Assert.Equal(ConnectLoadState.Loaded, session.LoadState);   // no retry cycle, no unprotected window
+        Assert.Equal(1, session.LoadAttempts);
+        Assert.Empty(h.Scheduled.Where(s => s.Delay < TimeSpan.FromSeconds(10))); // only the verification deadline timer, if any
         Assert.Single(h.Applied);
-        Assert.Equal(2, session.LoadAttempts);
-        Assert.Single(PlayerPenaltyManager.GetPlayerPenalties(session.Slot, PenaltyType.Mute)); // one mute, applied once
+        Assert.Single(PlayerPenaltyManager.GetPlayerPenalties(session.Slot, PenaltyType.Mute)); // applied once
+
+        await TestWorld.WaitUntil(() => Runtime.Db!.Pending == 0);   // the failing stats job has ended, quietly
+        await h.World.PumpUntil(() => h.World.World.Pending == 0);
+        Assert.Equal(0, CS2_SimpleAdmin.PlayersInfo[session.SteamId].TotalMutes); // counters stay at their defaults
+        Assert.Equal(ConnectLoadState.Loaded, session.LoadState);
+    }
+
+    [Fact]
+    public async Task StatsAreFilledInAfterTheRestrictionsWhenTheyAreAvailable()
+    {
+        var (h, provider, db) = await WithDatabase();
+        using var _h = h;
+        await using var _db = db;
+        var session = h.Connect();
+
+        h.Manager.QueueLoad(session, Stopwatch.GetTimestamp());
+        await h.Settle(session);
+        await h.World.PumpUntil(() => Runtime.Db!.Pending == 0 && h.World.World.Pending == 0);
+
+        Assert.Equal(1, CS2_SimpleAdmin.PlayersInfo[session.SteamId].TotalMutes);
     }
 
     [Fact]

@@ -9,9 +9,7 @@ public interface IDatabaseProvider
     Task DatabaseMigrationAsync();
     
     // CacheManager
-    string GetBanSelectQuery(bool multiServer);
     string GetIpHistoryQuery();
-    string GetBanUpdateQuery(bool multiServer);
 
     // PlayerManager
     string GetUpsertPlayerIpQuery();
@@ -34,12 +32,12 @@ public interface IDatabaseProvider
     string GetAddBanQuery();
     string GetAddBanBySteamIdQuery();
     string GetAddBanByIpQuery();
-    string GetUnbanRetrieveBansQuery(bool multiServer);
+    string GetUnbanRetrieveBansQuery();
     string GetUnbanAdminIdQuery();
     string GetInsertUnbanQuery(bool includeReason);
     string GetUpdateBanStatusQuery();
-    string GetExpireBansQuery(bool multiServer);
-    string GetExpireIpBansQuery(bool multiServer);
+    string GetExpireBansQuery();
+    string GetExpireIpBansQuery();
     string GetExpireOldPlayerIpsQuery();
 
     // Renames (css_prename)
@@ -49,39 +47,46 @@ public interface IDatabaseProvider
 
     // MuteManager
     string GetAddMuteQuery(bool includePlayerName);
-    string GetIsMutedQuery(bool multiServer, int timeMode);
-    string GetMuteStatsQuery(bool multiServer);
-    string GetUpdateMutePassedQuery(bool multiServer);
-    string GetCheckExpiredMutesQuery(bool multiServer);
-    string GetRetrieveMutesQuery(bool multiServer);
+    string GetIsMutedQuery(int timeMode);
+
+    /// <summary>Typed active mutes (id, owner, type, ends, duration, created, passed) of <c>player_steamid IN @ids</c>.</summary>
+    string GetActiveMutesBatchQuery(int timeMode);
+
+    /// <summary>Authoritative connect-time ban lookup: active, unexpired bans of <c>@PlayerSteamID</c>.</summary>
+    string GetActiveSteamBansQuery();
+
+    /// <summary>Which of <c>@ids</c> are still active, unexpired bans (verifies a cached IP match).</summary>
+    string GetActiveBansByIdsQuery();
+    string GetMuteStatsQuery();
+    string GetRetrieveMutesQuery();
     string GetUnmuteAdminIdQuery();
     string GetInsertUnmuteQuery(bool includeReason);
     string GetUpdateMuteStatusQuery();
-    string GetExpireMutesQuery(bool multiServer, int timeMode);
+    string GetExpireMutesQuery(int timeMode);
     
     // WarnManager
     string GetAddWarnQuery(bool includePlayerName);
-    string GetPlayerWarnsQuery(bool multiServer, bool active);
-    string GetPlayerWarnsCountQuery(bool multiServer, bool active);
-    string GetUnwarnByIdQuery(bool multiServer);
-    string GetUnwarnLastQuery(bool multiServer);
-    string GetExpireWarnsQuery(bool multiServer);
+    string GetPlayerWarnsQuery(bool active);
+    string GetPlayerWarnsCountQuery(bool active);
+    string GetUnwarnByIdQuery();
+    string GetUnwarnLastQuery();
+    string GetExpireWarnsQuery();
 
     // Penalty history (css_history)
-    string GetPenaltyHistoryQuery(bool multiServer);
+    string GetPenaltyHistoryQuery();
 
     // Connect load: all totals in one round trip
-    string GetPlayerPenaltyStatsQuery(bool multiServer);
+    string GetPlayerPenaltyStatsQuery();
 
     // TimeMode 0 (online time), set-based over the online players
-    string GetWarnsMenuPageQuery(bool multiServer);
-    string GetWarnsMenuCountQuery(bool multiServer);
-    string GetOnlineCreditPlanQuery(bool multiServer);
+    string GetWarnsMenuPageQuery();
+    string GetWarnsMenuCountQuery();
+    string GetOnlineCreditPlanQuery();
     string GetApplyOnlineCreditQuery(IReadOnlyList<Managers.OnlineCreditStep> steps);
-    string GetExpiredOnlineMutesBatchQuery(bool multiServer);
+    string GetExpiredOnlineMutesBatchQuery();
 
     // Penalty history (css_history): filtered + paged in SQL
-    string GetPenaltyHistoryPageQuery(bool multiServer, string? type);
-    string GetPenaltyHistoryCountQuery(bool multiServer, string? type);
+    string GetPenaltyHistoryPageQuery(string? type);
+    string GetPenaltyHistoryCountQuery(string? type);
 
 }

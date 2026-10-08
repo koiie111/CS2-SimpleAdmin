@@ -378,7 +378,7 @@ Notifications include:
 **Solution:**
 - Penalties should persist automatically
 - Check database connection
-- Verify MultiServerMode if using multiple servers
+- Penalties apply on every server of the shared database (`MultiServerMode` is ignored)
 
 ### Player can't see their penalties
 

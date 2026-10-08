@@ -105,7 +105,7 @@ public class ServerManager
                 var config = plugin.Config;
                 await WithRetries(context, "cache-init", async ct =>
                 {
-                    await cache.InitializeCacheAsync(config, serverId, ct).ConfigureAwait(false);
+                    await cache.InitializeCacheAsync(config, ct).ConfigureAwait(false);
                     return true;
                 }).ConfigureAwait(false);
             }

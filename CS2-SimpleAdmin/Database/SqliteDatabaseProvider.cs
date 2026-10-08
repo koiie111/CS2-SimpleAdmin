@@ -52,50 +52,6 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
         return migration.ExecuteMigrationsAsync();
     }
 
-    public string GetBanSelectQuery(bool multiServer) =>
-        multiServer
-            ? """
-              SELECT id AS Id,
-                     player_name AS PlayerName,
-                     player_steamid AS PlayerSteamId,
-                     player_ip AS PlayerIp,
-                     status AS Status
-              FROM sa_bans
-              """
-            : """
-              SELECT id AS Id,
-                     player_name AS PlayerName,
-                     player_steamid AS PlayerSteamId,
-                     player_ip AS PlayerIp,
-                     status AS Status
-              FROM sa_bans
-              WHERE server_id = @serverId
-              """;
-
-    public static string GetBanUpdatedSelectQuery(bool multiServer) =>
-        multiServer
-            ? """
-              SELECT id AS Id,
-                     player_name AS PlayerName,
-                     player_steamid AS PlayerSteamId,
-                     player_ip AS PlayerIp,
-                     status AS Status
-              FROM sa_bans
-              WHERE updated_at > @lastUpdate OR created > @lastUpdate
-              ORDER BY updated_at DESC
-              """
-            : """
-              SELECT id AS Id,
-                     player_name AS PlayerName,
-                     player_steamid AS PlayerSteamId,
-                     player_ip AS PlayerIp,
-                     status AS Status
-              FROM sa_bans
-              WHERE (updated_at > @lastUpdate OR created > @lastUpdate)
-              AND server_id = @serverId
-              ORDER BY updated_at DESC
-              """;
-
     public string GetIpHistoryQuery() =>
         "SELECT steamid, name, address, used_at FROM sa_players_ips ORDER BY used_at DESC";
 
@@ -109,26 +65,6 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
                 name = @playerName;
             """;
     }
-
-    public string GetBanUpdateQuery(bool multiServer) =>
-        multiServer
-            ? """
-              UPDATE sa_bans
-              SET player_ip   = COALESCE(player_ip, @PlayerIP),
-                  player_name = COALESCE(player_name, @PlayerName)
-              WHERE (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP)
-                AND status = 'ACTIVE'
-                AND (duration = 0 OR ends > @CurrentTime)
-              """
-            : """
-              UPDATE sa_bans
-              SET player_ip   = COALESCE(player_ip, @PlayerIP),
-                  player_name = COALESCE(player_name, @PlayerName)
-              WHERE (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP)
-                AND status = 'ACTIVE'
-                AND (duration = 0 OR ends > @CurrentTime)
-                AND server_id = @ServerId
-              """;
 
     public string GetAddBanQuery() =>
         """
@@ -157,10 +93,8 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
         SELECT last_insert_rowid();
         """;
 
-    public string GetUnbanRetrieveBansQuery(bool multiServer) =>
-        multiServer
-            ? "SELECT id, player_steamid FROM sa_bans WHERE (player_steamid = @pattern OR player_name = @pattern OR player_ip = @pattern) AND status = 'ACTIVE'"
-            : "SELECT id, player_steamid FROM sa_bans WHERE (player_steamid = @pattern OR player_name = @pattern OR player_ip = @pattern) AND status = 'ACTIVE' AND server_id = @serverid";
+    public string GetUnbanRetrieveBansQuery() =>
+        "SELECT id, player_steamid FROM sa_bans WHERE (player_steamid = @pattern OR player_name = @pattern OR player_ip = @pattern) AND status = 'ACTIVE'";
 
     public string GetUnbanAdminIdQuery() =>
         "SELECT id FROM sa_admins WHERE player_steamid = @adminSteamId";
@@ -174,15 +108,11 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
     public string GetUpdateBanStatusQuery() =>
         "UPDATE sa_bans SET status = 'UNBANNED', unban_id = @unbanId, updated_at = CURRENT_TIMESTAMP WHERE id = @banId";
 
-    public string GetExpireBansQuery(bool multiServer) =>
-        multiServer
-            ? "UPDATE sa_bans SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @currentTime"
-            : "UPDATE sa_bans SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @currentTime AND server_id = @serverid";
+    public string GetExpireBansQuery() =>
+        "UPDATE sa_bans SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @currentTime";
 
-    public string GetExpireIpBansQuery(bool multiServer) =>
-        multiServer
-            ? "UPDATE sa_bans SET player_ip = NULL WHERE status = 'ACTIVE' AND ends <= @ipBansTime"
-            : "UPDATE sa_bans SET player_ip = NULL WHERE status = 'ACTIVE' AND ends <= @ipBansTime AND server_id = @serverid";
+    public string GetExpireIpBansQuery() =>
+        "UPDATE sa_bans SET player_ip = NULL WHERE status = 'ACTIVE' AND ends <= @ipBansTime";
 
     public string GetExpireOldPlayerIpsQuery() =>
         "DELETE FROM sa_players_ips WHERE used_at <= @ipBansTime";
@@ -276,48 +206,29 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
               SELECT last_insert_rowid();
               """;
 
-    public string GetIsMutedQuery(bool multiServer, int timeMode) =>
-        multiServer
-            ? (timeMode == 1
-                ? "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR ends > @CurrentTime)"
-                : "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR duration > COALESCE(passed, 0))")
-            : (timeMode == 1
-                ? "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR ends > @CurrentTime) AND server_id = @serverid"
-                : "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR duration > COALESCE(passed, 0)) AND server_id = @serverid");
+    public string GetIsMutedQuery(int timeMode) =>
+        timeMode == 1
+            ? "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR ends > @CurrentTime)"
+            : "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration = 0 OR duration > COALESCE(passed, 0))";
 
-    public string GetMuteStatsQuery(bool multiServer) =>
-        multiServer
-            ? """
-              SELECT
-                  COUNT(CASE WHEN type = 'MUTE' THEN 1 END) AS TotalMutes,
-                  COUNT(CASE WHEN type = 'GAG' THEN 1 END) AS TotalGags,
-                  COUNT(CASE WHEN type = 'SILENCE' THEN 1 END) AS TotalSilences
-              FROM sa_mutes
-              WHERE player_steamid = @PlayerSteamID;
-              """
-            : """
-              SELECT
-                  COUNT(CASE WHEN type = 'MUTE' THEN 1 END) AS TotalMutes,
-                  COUNT(CASE WHEN type = 'GAG' THEN 1 END) AS TotalGags,
-                  COUNT(CASE WHEN type = 'SILENCE' THEN 1 END) AS TotalSilences
-              FROM sa_mutes
-              WHERE player_steamid = @PlayerSteamID AND server_id = @ServerId;
-              """;
+    public string GetActiveMutesBatchQuery(int timeMode) => SharedQueries.ActiveMutesBatch(timeMode);
 
-    public string GetUpdateMutePassedQuery(bool multiServer) =>
-        multiServer
-            ? "UPDATE sa_mutes SET passed = COALESCE(passed, 0) + 1 WHERE (player_steamid = @PlayerSteamID) AND duration > 0 AND status = 'ACTIVE'"
-            : "UPDATE sa_mutes SET passed = COALESCE(passed, 0) + 1 WHERE (player_steamid = @PlayerSteamID) AND duration > 0 AND status = 'ACTIVE' AND server_id = @serverid";
+    public string GetActiveSteamBansQuery() => SharedQueries.ActiveSteamBans;
 
-    public string GetCheckExpiredMutesQuery(bool multiServer) =>
-        multiServer
-            ? "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND passed >= duration AND duration > 0 AND status = 'ACTIVE'"
-            : "SELECT * FROM sa_mutes WHERE player_steamid = @PlayerSteamID AND passed >= duration AND duration > 0 AND status = 'ACTIVE' AND server_id = @serverid";
+    public string GetActiveBansByIdsQuery() => SharedQueries.ActiveBansByIds;
 
-    public string GetRetrieveMutesQuery(bool multiServer) =>
-        multiServer
-            ? "SELECT id FROM sa_mutes WHERE (player_steamid = @pattern OR player_name = @pattern) AND type = @muteType AND status = 'ACTIVE'"
-            : "SELECT id FROM sa_mutes WHERE (player_steamid = @pattern OR player_name = @pattern) AND type = @muteType AND status = 'ACTIVE' AND server_id = @serverid";
+    public string GetMuteStatsQuery() =>
+        """
+        SELECT
+            COUNT(CASE WHEN type = 'MUTE' THEN 1 END) AS TotalMutes,
+            COUNT(CASE WHEN type = 'GAG' THEN 1 END) AS TotalGags,
+            COUNT(CASE WHEN type = 'SILENCE' THEN 1 END) AS TotalSilences
+        FROM sa_mutes
+        WHERE player_steamid = @PlayerSteamID;
+        """;
+
+    public string GetRetrieveMutesQuery() =>
+        "SELECT id FROM sa_mutes WHERE (player_steamid = @pattern OR player_name = @pattern) AND type = @muteType AND status = 'ACTIVE'";
 
     public string GetUnmuteAdminIdQuery() =>
         "SELECT id FROM sa_admins WHERE player_steamid = @adminSteamId";
@@ -330,15 +241,11 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
     public string GetUpdateMuteStatusQuery() =>
         "UPDATE sa_mutes SET status = 'UNMUTED', unmute_id = @unmuteId WHERE id = @muteId";
 
-    public string GetExpireMutesQuery(bool multiServer, int timeMode) =>
-        multiServer
-            ? (timeMode == 1
-                ? "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime"
-                : "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND passed >= duration")
-            : (timeMode == 1
-                ? "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime AND server_id = @serverid"
-                : "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND passed >= duration AND server_id = @serverid");
-    
+    public string GetExpireMutesQuery(int timeMode) =>
+        timeMode == 1
+            ? "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime"
+            : "UPDATE sa_mutes SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND passed >= duration";
+
     public string GetAddWarnQuery(bool includePlayerName) =>
         includePlayerName
             ? """
@@ -356,83 +263,68 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
               SELECT last_insert_rowid();
               """;
 
-    public string GetPlayerWarnsQuery(bool multiServer, bool active) =>
-        multiServer
-            ? active
-                ? "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' ORDER BY id DESC"
-                : "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID ORDER BY id DESC"
-            : active
-                ? "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID AND server_id = @serverid AND status = 'ACTIVE' ORDER BY id DESC"
-                : "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID AND server_id = @serverid ORDER BY id DESC";
+    public string GetPlayerWarnsQuery(bool active) =>
+        active
+            ? "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' ORDER BY id DESC"
+            : "SELECT * FROM sa_warns WHERE player_steamid = @PlayerSteamID ORDER BY id DESC";
 
-    public string GetPlayerWarnsCountQuery(bool multiServer, bool active) =>
-        multiServer
-            ? active
-                ? "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE'"
-                : "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID"
-            : active
-                ? "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID AND server_id = @serverid AND status = 'ACTIVE'"
-                : "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID AND server_id = @serverid";
+    public string GetPlayerWarnsCountQuery(bool active) =>
+        active
+            ? "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE'"
+            : "SELECT COUNT(*) FROM sa_warns WHERE player_steamid = @PlayerSteamID";
 
-    public string GetUnwarnByIdQuery(bool multiServer) =>
-        multiServer
-            ? "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND player_steamid = @steamid AND id = @warnId"
-            : "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND player_steamid = @steamid AND id = @warnId AND server_id = @serverid";
+    public string GetUnwarnByIdQuery() =>
+        "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND player_steamid = @steamid AND id = @warnId";
 
-    public string GetUnwarnLastQuery(bool multiServer) =>
-        multiServer
-            ? """
-              UPDATE sa_warns
-              SET status = 'EXPIRED'
-              WHERE status = 'ACTIVE'
-              AND player_steamid = @steamid
-              ORDER BY id DESC
-              LIMIT 1
-              """
-            : """
-              UPDATE sa_warns
-              SET status = 'EXPIRED'
-              WHERE status = 'ACTIVE'
-              AND player_steamid = @steamid
-              AND server_id = @serverid
-              ORDER BY id DESC
-              LIMIT 1
-              """;
+    public string GetUnwarnLastQuery() =>
+        """
+        UPDATE sa_warns
+        SET status = 'EXPIRED'
+        WHERE status = 'ACTIVE'
+        AND player_steamid = @steamid
+        ORDER BY id DESC
+        LIMIT 1
+        """;
 
-    public string GetExpireWarnsQuery(bool multiServer) =>
-        multiServer
-            ? "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime"
-            : "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime AND server_id = @serverid";
+    public string GetExpireWarnsQuery() =>
+        "UPDATE sa_warns SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND duration > 0 AND ends <= @CurrentTime";
 
-    public string GetPlayerPenaltyStatsQuery(bool multiServer) => SharedQueries.PlayerPenaltyStats(multiServer);
-    public string GetWarnsMenuPageQuery(bool multiServer) => SharedQueries.WarnsMenuPage(multiServer);
-    public string GetWarnsMenuCountQuery(bool multiServer) => SharedQueries.WarnsMenuCount(multiServer);
-    public string GetOnlineCreditPlanQuery(bool multiServer) => SharedQueries.OnlineCreditPlan(multiServer);
+    public string GetPlayerPenaltyStatsQuery() => SharedQueries.PlayerPenaltyStats();
+
+    public string GetWarnsMenuPageQuery() => SharedQueries.WarnsMenuPage();
+
+    public string GetWarnsMenuCountQuery() => SharedQueries.WarnsMenuCount();
+
+    public string GetOnlineCreditPlanQuery() => SharedQueries.OnlineCreditPlan();
+
     public string GetApplyOnlineCreditQuery(IReadOnlyList<Managers.OnlineCreditStep> steps) => SharedQueries.ApplyOnlineCredit(steps);
-    public string GetExpiredOnlineMutesBatchQuery(bool multiServer) => SharedQueries.ExpiredOnlineMutesBatch(multiServer);
-    public string GetPenaltyHistoryPageQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryPage(multiServer, type);
-    public string GetPenaltyHistoryCountQuery(bool multiServer, string? type) => SharedQueries.PenaltyHistoryCount(multiServer, type);
+    public string GetExpiredOnlineMutesBatchQuery() => SharedQueries.ExpiredOnlineMutesBatch();
 
-    public string GetPenaltyHistoryQuery(bool multiServer) =>
-        $"""
+    public string GetPenaltyHistoryPageQuery(string? type) => SharedQueries.PenaltyHistoryPage(type);
+
+    public string GetPenaltyHistoryCountQuery(string? type) => SharedQueries.PenaltyHistoryCount(type);
+
+    public string GetPenaltyHistoryQuery() =>
+        """
         SELECT b.id, 'BAN' AS type, b.player_name, b.admin_name, b.reason, b.duration, b.created, b.ends, b.status,
                ub.reason AS lift_reason, ub.date AS lift_date, ua.player_name AS lift_admin
         FROM sa_bans b
         LEFT JOIN sa_unbans ub ON ub.id = b.unban_id
         LEFT JOIN sa_admins ua ON ua.id = ub.admin_id
-        WHERE b.player_steamid = @PlayerSteamID {(multiServer ? "" : "AND b.server_id = @serverid")}
+        WHERE b.player_steamid = @PlayerSteamID
         UNION ALL
         SELECT m.id, m.type, m.player_name, m.admin_name, m.reason, m.duration, m.created, m.ends, m.status,
                um.reason AS lift_reason, um.date AS lift_date, ua.player_name AS lift_admin
         FROM sa_mutes m
         LEFT JOIN sa_unmutes um ON um.id = m.unmute_id
         LEFT JOIN sa_admins ua ON ua.id = um.admin_id
-        WHERE m.player_steamid = @PlayerSteamID {(multiServer ? "" : "AND m.server_id = @serverid")}
+        WHERE m.player_steamid = @PlayerSteamID
         UNION ALL
         SELECT w.id, 'WARN' AS type, w.player_name, w.admin_name, w.reason, w.duration, w.created, w.ends, w.status,
                NULL AS lift_reason, NULL AS lift_date, NULL AS lift_admin
         FROM sa_warns w
-        WHERE w.player_steamid = @PlayerSteamID {(multiServer ? "" : "AND w.server_id = @serverid")}
+        WHERE w.player_steamid = @PlayerSteamID
         ORDER BY created DESC
         """;
+
 }

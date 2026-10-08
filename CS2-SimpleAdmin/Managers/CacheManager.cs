@@ -78,17 +78,18 @@ internal class CacheManager : IDisposable
         "id AS Id, player_name AS PlayerName, player_steamid AS PlayerSteamId, player_ip AS PlayerIp, " +
         "status AS Status, created AS Created, ends AS Ends, duration AS Duration";
 
-    internal static string ActiveBansPageSql(bool multiServer) =>
-        $"SELECT {BanColumns} FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")} AND id > @afterId ORDER BY id LIMIT @limit";
+    // Bans are network-wide: none of these statements filters by server_id (it only records where a ban was issued).
+    internal static string ActiveBansPageSql =>
+        $"SELECT {BanColumns} FROM sa_bans WHERE status = 'ACTIVE' AND id > @afterId ORDER BY id LIMIT @limit";
 
-    internal static string ChangedBansPageSql(bool multiServer) =>
-        $"SELECT {BanColumns} FROM sa_bans WHERE (updated_at >= @since OR created >= @since){(multiServer ? "" : " AND server_id = @serverId")} AND id > @afterId ORDER BY id LIMIT @limit";
+    internal static string ChangedBansPageSql =>
+        $"SELECT {BanColumns} FROM sa_bans WHERE (updated_at >= @since OR created >= @since) AND id > @afterId ORDER BY id LIMIT @limit";
 
-    internal static string ActiveChecksumSql(bool multiServer) =>
-        $"SELECT COUNT(*) AS Cnt, COALESCE(SUM(id), 0) AS IdSum FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")}";
+    internal static string ActiveChecksumSql =>
+        "SELECT COUNT(*) AS Cnt, COALESCE(SUM(id), 0) AS IdSum FROM sa_bans WHERE status = 'ACTIVE'";
 
-    internal static string ActiveIdsSql(bool multiServer) =>
-        $"SELECT id FROM sa_bans WHERE status = 'ACTIVE'{(multiServer ? "" : " AND server_id = @serverId")}";
+    internal static string ActiveIdsSql =>
+        "SELECT id FROM sa_bans WHERE status = 'ACTIVE'";
 
     internal static string BansByIdsSql => $"SELECT {BanColumns} FROM sa_bans WHERE id IN @ids";
 
@@ -107,12 +108,11 @@ internal class CacheManager : IDisposable
     internal const string IpChecksumSql =
         "SELECT COUNT(*), COALESCE(SUM(steamid % 2147483647), 0), COALESCE(SUM(address), 0) FROM sa_players_ips WHERE used_at > @cutoff";
 
-    private static async Task<(long Count, long IdSum)> ReadChecksumAsync(DbConnection connection, bool multiServer,
-        int? serverId, CancellationToken ct)
+    private static async Task<(long Count, long IdSum)> ReadChecksumAsync(DbConnection connection, CancellationToken ct)
     {
         // Read as objects: MySQL returns BIGINT/DECIMAL, SQLite INTEGER
-        await using var reader = await connection.ExecuteReaderAsync(new CommandDefinition(ActiveChecksumSql(multiServer),
-            new { serverId }, cancellationToken: ct)).ConfigureAwait(false);
+        await using var reader = await connection.ExecuteReaderAsync(new CommandDefinition(ActiveChecksumSql,
+            cancellationToken: ct)).ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return (0, 0);
         return (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)));
     }
@@ -123,13 +123,13 @@ internal class CacheManager : IDisposable
     /// Builds the cache from scratch and publishes it. Runs on a DB worker. The previous snapshot keeps serving
     /// readers until the new one is complete; on failure it stays in place and the exception propagates.
     /// </summary>
-    public async Task InitializeCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    public async Task InitializeCacheAsync(CS2_SimpleAdminConfig config, CancellationToken ct)
     {
         if (CS2_SimpleAdmin.DatabaseProvider == null || _disposed) return;
         await _writer.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await BuildAndPublishAsync(config, serverId, ct).ConfigureAwait(false);
+            await BuildAndPublishAsync(config, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -138,22 +138,21 @@ internal class CacheManager : IDisposable
     }
 
     /// <summary>css_reloadbans: same as the initial build, serialised with refreshes.</summary>
-    public Task ForceReInitializeCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct) =>
-        InitializeCacheAsync(config, serverId, ct);
+    public Task ForceReInitializeCacheAsync(CS2_SimpleAdminConfig config, CancellationToken ct) =>
+        InitializeCacheAsync(config, ct);
 
-    private async Task BuildAndPublishAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    private async Task BuildAndPublishAsync(CS2_SimpleAdminConfig config, CancellationToken ct)
     {
         var start = LatencyHistogram.Now();
         await using var connection = await CS2_SimpleAdmin.DatabaseProvider!.CreateConnectionAsync(ct).ConfigureAwait(false);
         var dbNow = await GetDatabaseTimeAsync(connection, ct).ConfigureAwait(false);
-        var multiServer = config.MultiServerMode;
 
         var bans = new List<BanRecord>();
         var afterId = 0;
         while (true)
         {
-            var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ActiveBansPageSql(multiServer),
-                new { serverId, afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
+            var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ActiveBansPageSql,
+                new { afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
             bans.AddRange(page);
             if (page.Count < BanPageSize) break;
             afterId = page[^1].Id;
@@ -202,7 +201,7 @@ internal class CacheManager : IDisposable
     // ------------------------------------------------------------------ incremental refresh
 
     /// <summary>Applies database changes since the last successful refresh (see class remarks).</summary>
-    public async Task RefreshCacheAsync(CS2_SimpleAdminConfig config, int? serverId, CancellationToken ct)
+    public async Task RefreshCacheAsync(CS2_SimpleAdminConfig config, CancellationToken ct)
     {
         if (CS2_SimpleAdmin.DatabaseProvider == null || _disposed) return;
         await _writer.WaitAsync(ct).ConfigureAwait(false);
@@ -210,14 +209,13 @@ internal class CacheManager : IDisposable
         {
             if (!Snapshot.IsInitialized || _needsFullRebuild || _banWatermark == null)
             {
-                await BuildAndPublishAsync(config, serverId, ct).ConfigureAwait(false);
+                await BuildAndPublishAsync(config, ct).ConfigureAwait(false);
                 return;
             }
 
             var start = LatencyHistogram.Now();
             await using var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false);
             var dbNow = await GetDatabaseTimeAsync(connection, ct).ConfigureAwait(false);
-            var multiServer = config.MultiServerMode;
             var snapshot = Snapshot;
 
             // 1) changed bans, paged by id
@@ -234,8 +232,8 @@ internal class CacheManager : IDisposable
                     return;
                 }
 
-                var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ChangedBansPageSql(multiServer),
-                    new { since, serverId, afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
+                var page = (await connection.QueryAsync<BanRecord>(new CommandDefinition(ChangedBansPageSql,
+                    new { since, afterId, limit = BanPageSize }, cancellationToken: ct)).ConfigureAwait(false)).AsList();
                 changed.AddRange(page);
                 if (page.Count < BanPageSize) break;
                 afterId = page[^1].Id;
@@ -244,9 +242,9 @@ internal class CacheManager : IDisposable
             var next = snapshot.WithBans(FilterRealChanges(snapshot, changed));
 
             // 2) checksum of the ACTIVE set → reconcile deletions / invisible changes
-            var (dbCount, dbIdSum) = await ReadChecksumAsync(connection, multiServer, serverId, ct).ConfigureAwait(false);
+            var (dbCount, dbIdSum) = await ReadChecksumAsync(connection, ct).ConfigureAwait(false);
             if (dbCount != next.ActiveCount || dbIdSum != next.ActiveIdSum)
-                next = await ReconcileAsync(connection, next, multiServer, serverId, ct).ConfigureAwait(false);
+                next = await ReconcileAsync(connection, next, ct).ConfigureAwait(false);
 
             // 3) IP history: delta in, stale/deleted links out
             var ipDrained = true;
@@ -315,11 +313,11 @@ internal class CacheManager : IDisposable
         }
     }
 
-    private async Task<BanCacheSnapshot> ReconcileAsync(DbConnection connection, BanCacheSnapshot next, bool multiServer,
-        int? serverId, CancellationToken ct)
+    private async Task<BanCacheSnapshot> ReconcileAsync(DbConnection connection, BanCacheSnapshot next,
+        CancellationToken ct)
     {
         Interlocked.Increment(ref PluginMetrics.CacheReconciles);
-        var dbIds = (await connection.QueryAsync<int>(new CommandDefinition(ActiveIdsSql(multiServer), new { serverId },
+        var dbIds = (await connection.QueryAsync<int>(new CommandDefinition(ActiveIdsSql,
             cancellationToken: ct)).ConfigureAwait(false)).ToHashSet();
 
         var removed = new List<int>();
@@ -527,6 +525,21 @@ internal class CacheManager : IDisposable
         };
     }
 
+    /// <summary>
+    /// The IP-derived part of <see cref="CheckBan"/> only (BanType &gt; 0): the player's own SteamID ban is deliberately
+    /// not looked at. A connecting player's SteamID ban is decided by the database (<see cref="BanDecider"/>); this
+    /// cache answer supplies the IP candidates, which are verified there as well.
+    /// </summary>
+    public BanCheckResult CheckBanByIpOnly(CS2_SimpleAdminConfig config, ulong steamId, string? ipAddress, DateTime now)
+    {
+        var other = config.OtherSettings;
+        if (other.BanType == 0) return BanCheckResult.NotBanned;
+        var snapshot = Snapshot;
+        return other.CheckMultiAccountsByIp
+            ? snapshot.CheckPlayerOrAnyIp(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, true, now, includeSteamMatch: false)
+            : snapshot.CheckPlayer(null, ipAddress, other.BanType, other.ExpireOldIpBans, now);
+    }
+
     /// <summary>Same conditions as the original code for back-filling ban rows with the player's data.</summary>
     internal static bool NeedsPlayerDataUpdate(BanCheckResult result, bool multiAccountPath, string? ipAddress)
     {
@@ -548,7 +561,7 @@ internal class CacheManager : IDisposable
     /// Fills missing player_ip/player_name on the player's active ban rows in the database (DB worker), then
     /// mirrors the change into a new snapshot (no in-place mutation of cached records).
     /// </summary>
-    public async Task UpdatePlayerDataAsync(CS2_SimpleAdminConfig config, int? serverId, string? playerName, ulong? steamId,
+    public async Task UpdatePlayerDataAsync(CS2_SimpleAdminConfig config, string? playerName, ulong? steamId,
         string? ipAddress, CancellationToken ct)
     {
         if (CS2_SimpleAdmin.DatabaseProvider == null) return;
@@ -564,9 +577,6 @@ internal class CacheManager : IDisposable
                               AND (duration = 0 OR ends > @CurrentTime)
                       """;
 
-        if (!config.MultiServerMode)
-            baseSql += " AND server_id = @ServerId;";
-
         var other = config.OtherSettings;
         var playerIp = other.BanType == 0 || string.IsNullOrEmpty(ipAddress) || other.IgnoredIps.Contains(ipAddress)
             ? null
@@ -576,8 +586,7 @@ internal class CacheManager : IDisposable
             PlayerSteamID = steamId,
             PlayerIP = playerIp,
             PlayerName = string.IsNullOrEmpty(playerName) ? string.Empty : playerName,
-            CurrentTime = Time.ActualDateTime(),
-            ServerId = serverId
+            CurrentTime = Time.ActualDateTime()
         };
 
         await using (var connection = await CS2_SimpleAdmin.DatabaseProvider.CreateConnectionAsync(ct).ConfigureAwait(false))

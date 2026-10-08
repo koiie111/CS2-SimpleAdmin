@@ -164,13 +164,11 @@ public abstract class BasicMenu
         {
             var localizer = CS2_SimpleAdmin._localizer;
             var adminSteamId = admin.SteamID;
-            var multiServer = CS2_SimpleAdmin.Instance.Config.MultiServerMode;
-            var serverId = CS2_SimpleAdmin.ServerId;
 
             if (!CS2_SimpleAdmin.EnsureDatabaseReady(null)) return;
             var accepted = Infrastructure.Runtime.TryQueueDb("history-menu", async ct =>
             {
-                var result = await Managers.PlayerManager.GetPenaltyHistoryPage(steamId, null, page, HistoryMenuPageSize, multiServer, serverId, ct);
+                var result = await Managers.PlayerManager.GetPenaltyHistoryPage(steamId, null, page, HistoryMenuPageSize, ct);
                 await Infrastructure.Runtime.OnGameThread(() =>
                 {
                     // The slot may have been reused by another player while the query ran

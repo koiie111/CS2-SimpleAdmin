@@ -113,6 +113,8 @@ internal static class PluginMetrics
     public static long DispatcherDeferredUpdates;
     public static long DispatcherOverBudgetItems;
     public static long StaleSessionResults;
+    public static long UnverifiedKicked;
+    public static long MuteSyncRefused;
     public static long PeriodicSkippedOverlap;
     public static long ReloadAdminsCoalesced;
     public static long CacheReconciles;
@@ -136,7 +138,7 @@ internal static class PluginMetrics
         sb.AppendLine(
             $"dispatcher: rejected={Interlocked.Read(ref DispatcherRejected)} stale={Interlocked.Read(ref DispatcherDroppedStale)} deferredUpdates={Interlocked.Read(ref DispatcherDeferredUpdates)} overBudgetItems={Interlocked.Read(ref DispatcherOverBudgetItems)}");
         sb.AppendLine(
-            $"misc: staleSession={Interlocked.Read(ref StaleSessionResults)} periodicSkipped={Interlocked.Read(ref PeriodicSkippedOverlap)} reloadCoalesced={Interlocked.Read(ref ReloadAdminsCoalesced)} reconciles={Interlocked.Read(ref CacheReconciles)} connectDedup={Interlocked.Read(ref ConnectDeduplicated)} connectLoadRetries={Interlocked.Read(ref ConnectLoadRetries)}");
+            $"misc: staleSession={Interlocked.Read(ref StaleSessionResults)} periodicSkipped={Interlocked.Read(ref PeriodicSkippedOverlap)} reloadCoalesced={Interlocked.Read(ref ReloadAdminsCoalesced)} reconciles={Interlocked.Read(ref CacheReconciles)} connectDedup={Interlocked.Read(ref ConnectDeduplicated)} connectLoadRetries={Interlocked.Read(ref ConnectLoadRetries)} unverifiedKicked={Interlocked.Read(ref UnverifiedKicked)} muteSyncRefused={Interlocked.Read(ref MuteSyncRefused)}");
         sb.AppendLine(
             $"gc: gen0={GC.CollectionCount(0)} gen1={GC.CollectionCount(1)} gen2={GC.CollectionCount(2)} heap={GC.GetTotalMemory(false) / 1024}KB pause={GC.GetTotalPauseDuration().TotalMilliseconds:F1}ms");
         if (extra != null) sb.Append(extra());

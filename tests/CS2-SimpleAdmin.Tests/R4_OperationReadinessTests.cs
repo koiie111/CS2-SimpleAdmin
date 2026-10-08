@@ -133,8 +133,8 @@ public class R4_OperationReadinessTests
         await using var c = await db.OpenAsync();
         Assert.Equal(7, await c.ExecuteScalarAsync<int>("SELECT server_id FROM sa_mutes WHERE player_steamid = '76561198000000007'"));
 
-        // "after reconnect", single-server mode: the query filters by this server's id and still finds the mute
-        var active = await plugin.Plugin.MuteManager.GetActiveMutesAsync(76561198000000007, false, 1, 7, DateTime.UtcNow, default);
+        // "after reconnect": found whatever server id is recorded in the row (it is information, not a filter)
+        var active = await plugin.Plugin.MuteManager.GetActiveMutesAsync(76561198000000007, 1, DateTime.UtcNow, default);
         Assert.Single(active);
     }
 
