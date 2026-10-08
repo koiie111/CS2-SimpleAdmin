@@ -387,10 +387,11 @@ public partial class CS2_SimpleAdmin
         if (text.Length == 0)
             return HookResult.Stop;
 
-        if (ChatTriggers.StartsWithTrigger(text))
-        {
+        var startsWithTrigger = ChatTriggers.StartsWithTrigger(text);
+
+        // Not gagged: a trigger message is a normal command / chat line, let it through untouched
+        if (startsWithTrigger && !PlayerPenaltyManager.HasAnyPenalty(player.Slot, PenaltyType.Gag, PenaltyType.Silence))
             return HookResult.Continue;
-        }
 
         var checkStart = LatencyHistogram.Now();
         DateTime? endDateTime = null;
@@ -398,8 +399,22 @@ public partial class CS2_SimpleAdmin
                      (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out endDateTime) ||
                       PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out endDateTime));
         PluginMetrics.ChatPenaltyCheck.RecordSince(checkStart);
+        if (!gagged && startsWithTrigger)
+            return HookResult.Continue;
+
         if (gagged)
         {
+            // "!text" / "/text" used to skip this check and rely on HookUmChat to hide the line, which does not hold when
+            // another plugin formats and broadcasts chat. A gagged player's trigger message is never passed on: a
+            // command-shaped one is executed here silently, anything else is dropped.
+            if (startsWithTrigger)
+            {
+                var silentCommand = ChatTriggers.ToSilentCommand(text);
+                if (silentCommand != null)
+                    player.ExecuteClientCommandFromServer(silentCommand);
+                return HookResult.Stop;
+            }
+
             if (_localizer != null && endDateTime is not null)
                 player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
             return HookResult.Stop;

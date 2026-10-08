@@ -34,6 +34,43 @@ internal static class ChatTriggers
         return triggers;
     }
 
+    /// <summary>
+    /// For a gagged player: the chat-trigger message as a safe "css_..." console command, or null when it is not a
+    /// command-shaped message ("!привет", "!ez gg", "!x;quit"). Only ASCII command names without separators qualify,
+    /// so a trigger prefix cannot be used to push free text into public chat.
+    /// </summary>
+    public static string? ToSilentCommand(string message) => ToSilentCommand(message, GetTriggers());
+
+    internal static string? ToSilentCommand(string message, string[] triggers)
+    {
+        foreach (var trigger in triggers)
+        {
+            if (trigger.Length == 0 || !message.StartsWith(trigger, StringComparison.Ordinal)) continue;
+
+            var rest = message.AsSpan(trigger.Length).Trim();
+            if (rest.IsEmpty || rest.Length > 128) return null;
+
+            var nameEnd = rest.IndexOf(' ');
+            var name = nameEnd < 0 ? rest : rest[..nameEnd];
+            if (name.Length > 32) return null;
+            foreach (var c in name)
+                if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_'))
+                    return null;
+
+            foreach (var c in rest)
+                if (c is ';' or '"' or '\n' or '\r' or '\\' || char.IsControl(c))
+                    return null;
+
+            // Arguments of a command typed by a gagged player must be ASCII too, otherwise "!vip привет всем" is chat
+            foreach (var c in rest)
+                if (c > 127) return null;
+
+            return "css_" + rest.ToString();
+        }
+
+        return null;
+    }
+
     /// <summary>For tests: the matching rule without CoreConfig.</summary>
     internal static bool StartsWithAny(string message, string[] triggers)
     {
