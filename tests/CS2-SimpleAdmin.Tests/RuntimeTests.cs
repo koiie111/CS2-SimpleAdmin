@@ -52,9 +52,10 @@ public class GameDispatcherTests
 
         var waiting = dispatcher.PostAsync(() => { });
         Assert.False(waiting.IsCompleted); // back-pressure, not growth
-        world.RunOneUpdate();               // frees space; waiting item gets queued and a pump scheduled
-        world.RunOneUpdate();
-        await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+        // Frees space: the waiting item is queued by a thread-pool continuation and schedules its own pump. Pump world
+        // updates until it ran instead of assuming that continuation already happened after two updates (a race on slow machines).
+        await world.PumpUntil(() => waiting.IsCompleted, 5_000);
+        await waiting;
     }
 
     [Fact]
