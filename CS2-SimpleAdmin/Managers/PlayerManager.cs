@@ -400,18 +400,19 @@ internal class PlayerManager
         // The load is the first authoritative read of this connection: it replaces whatever database-backed state the slot
         // still holds (a previous occupant whose disconnect was missed) instead of adding to it; entries accepted after
         // the read (a command issued meanwhile) and API entries stay.
-        var voiceMuted = false;
         var rows = new List<PlayerPenaltyManager.DbPenalty>(result.ActiveMutes.Count);
         foreach (var mute in result.ActiveMutes)
         {
             var type = mute.Type switch { "GAG" => PenaltyType.Gag, "MUTE" => PenaltyType.Mute, _ => PenaltyType.Silence };
-            if (type != PenaltyType.Gag) voiceMuted = true;
             rows.Add(new PlayerPenaltyManager.DbPenalty(mute.Id, type, mute.Ends ?? DateTime.MinValue, mute.Duration));
         }
 
         PlayerPenaltyManager.ReconcileWithDatabase(session.Slot, result.Revision, rows);
 
-        NativeEffects(session, info, voiceMuted, false);
+        // Voice follows the final state of the slot (database rows, a command accepted during the read, API entries), in both
+        // directions: the native Muted bit may survive a plugin reload that a lifted mute did not
+        VoiceBit.SyncToPenalties(session);
+        NativeEffects(session, info, false);
     }
 
     // ---- the only places where a load result touches the engine; seams so the state logic is testable without a server ----
@@ -419,13 +420,12 @@ internal class PlayerManager
     /// <summary>Game thread: is the controller of this session resolvable right now?</summary>
     internal static Func<PlayerSession, bool> ControllerAvailable { get; set; } = static session => ResolveController(session) != null;
 
-    /// <summary>Game thread: voice flags (and, legacy, the admin notice) for a freshly loaded player. Only the Muted bit is touched.</summary>
-    internal static Action<PlayerSession, PlayerInfo, bool, bool> NativeEffects { get; set; } =
-        static (session, info, voiceMuted, notifyAdmins) =>
+    /// <summary>Game thread: the admin notice for a freshly loaded player (voice is handled by <see cref="VoiceBit"/>).</summary>
+    internal static Action<PlayerSession, PlayerInfo, bool> NativeEffects { get; set; } =
+        static (session, info, notifyAdmins) =>
         {
             var player = ResolveController(session);
             if (player == null) return;
-            if (voiceMuted) player.VoiceFlags |= VoiceFlags.Muted;
             if (notifyAdmins) NotifyAdmins(player, info);
         };
 

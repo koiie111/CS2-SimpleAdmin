@@ -29,7 +29,8 @@ public class R1_ConnectLoadRetryTests
             _plugin = new TestPlugin(Config, provider ?? new OutageProvider());
             PlayerManager.RetryScheduler = (delay, callback) => Scheduled.Add((delay, callback));
             PlayerManager.ControllerAvailable = _ => true;
-            PlayerManager.NativeEffects = (session, _, _, _) => Applied.Add(session);
+            PlayerManager.NativeEffects = (session, _, _) => Applied.Add(session);
+            new FakeNativeVoice().Install();
             PlayerManager.KickBanned = _ => { };
         }
 
@@ -44,6 +45,7 @@ public class R1_ConnectLoadRetryTests
 
         public void Dispose()
         {
+            FakeNativeVoice.Uninstall();
             _plugin.Dispose();
             _world.Dispose();
         }

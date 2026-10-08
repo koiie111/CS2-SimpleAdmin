@@ -249,8 +249,7 @@ internal static class PeriodicMaintenance
     /// <summary>Game thread: voice effect of a sync (seam; production changes only <c>VoiceFlags.Muted</c> of the controller).</summary>
     internal static Action<PlayerSession, bool> VoiceEffect { get; set; } = static (session, muted) =>
     {
-        if (PlayerManager.ResolveController(session) is not { } player) return;
-        player.VoiceFlags = muted ? player.VoiceFlags | VoiceFlags.Muted : PenaltyRemoval.WithoutMuted(player.VoiceFlags);
+        VoiceBit.Set(session, muted);
     };
 
     /// <summary>Game thread: applies one player's database state (see <see cref="QueueMuteSync"/>) if that connection is still current.</summary>

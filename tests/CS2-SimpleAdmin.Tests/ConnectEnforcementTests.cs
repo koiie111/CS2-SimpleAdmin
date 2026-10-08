@@ -23,6 +23,7 @@ public class ConnectEnforcementTests
         public readonly List<PlayerSession> Kicked = [];
         public readonly List<PlayerSession> KickedUnverified = [];
         public readonly List<bool> Voice = [];
+        public readonly FakeNativeVoice Native = new();
 
         public Harness(Database.IDatabaseProvider provider, bool sqliteWorkers = true, int dbCapacity = Runtime.DbQueueCapacity,
             PluginState state = PluginState.Ready, int timeMode = 1, bool multiServerMode = true, int banType = 1,
@@ -40,11 +41,12 @@ public class ConnectEnforcementTests
             Plugin = new TestPlugin(Config, provider);
             PlayerManager.RetryScheduler = (delay, callback) => Scheduled.Add((delay, callback));
             PlayerManager.ControllerAvailable = s => Runtime.Sessions.IsCurrent(s);
-            PlayerManager.NativeEffects = (session, _, _, _) => Applied.Add(session);
+            PlayerManager.NativeEffects = (session, _, _) => Applied.Add(session);
             PlayerManager.KickBanned = s => Kicked.Add(s);
             PlayerManager.KickUnverified = (s, _) => KickedUnverified.Add(s);
             PlayerManager.NotifyAdminsEffect = (_, _) => { };
             PeriodicMaintenance.VoiceEffect = (_, muted) => Voice.Add(muted);
+            Native.Install();
         }
 
         public PlayerSession Connect(int slot = 1, ulong steam = 76561198100100001, string? ip = null)
@@ -67,8 +69,9 @@ public class ConnectEnforcementTests
             PlayerManager.KickBanned = static _ => { };
             PlayerManager.KickUnverified = static (_, _) => { };
             PlayerManager.NotifyAdminsEffect = static (_, _) => { };
-            PlayerManager.NativeEffects = static (_, _, _, _) => { };
+            PlayerManager.NativeEffects = static (_, _, _) => { };
             PeriodicMaintenance.VoiceEffect = static (_, _) => { };
+            FakeNativeVoice.Uninstall();
             Plugin.Dispose();
             World.Dispose();
         }
