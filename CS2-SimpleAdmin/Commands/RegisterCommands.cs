@@ -13,67 +13,10 @@ public static class RegisterCommands
     private delegate void CommandCallback(CCSPlayerController? caller, CommandInfo.CommandCallback callback);
     
     private static readonly string CommandsPath = Path.Combine(CS2_SimpleAdmin.ConfigDirectory, "Commands.json");
-    private static readonly List<CommandMapping> CommandMappings =
-    [
-        new("css_ban", CS2_SimpleAdmin.Instance.OnBanCommand),
-        new("css_addban", CS2_SimpleAdmin.Instance.OnAddBanCommand),
-        new("css_banip", CS2_SimpleAdmin.Instance.OnBanIpCommand),
-        new("css_unban", CS2_SimpleAdmin.Instance.OnUnbanCommand),
-        new("css_warn", CS2_SimpleAdmin.Instance.OnWarnCommand),
-        new("css_unwarn", CS2_SimpleAdmin.Instance.OnUnwarnCommand),
-
-        new("css_asay", CS2_SimpleAdmin.Instance.OnAdminToAdminSayCommand),
-        new("css_cssay", CS2_SimpleAdmin.Instance.OnAdminCustomSayCommand),
-        new("css_say", CS2_SimpleAdmin.Instance.OnAdminSayCommand),
-        new("css_psay", CS2_SimpleAdmin.Instance.OnAdminPrivateSayCommand),
-        new("css_csay", CS2_SimpleAdmin.Instance.OnAdminCenterSayCommand),
-        new("css_hsay", CS2_SimpleAdmin.Instance.OnAdminHudSayCommand),
-
-        new("css_penalties", CS2_SimpleAdmin.Instance.OnPenaltiesCommand),
-        new("css_admin", CS2_SimpleAdmin.Instance.OnAdminCommand),
-        new("css_adminhelp", CS2_SimpleAdmin.Instance.OnAdminHelpCommand),
-        new("css_addadmin", CS2_SimpleAdmin.Instance.OnAddAdminCommand),
-        new("css_deladmin", CS2_SimpleAdmin.Instance.OnDelAdminCommand),
-        new("css_addgroup", CS2_SimpleAdmin.Instance.OnAddGroup),
-        new("css_delgroup", CS2_SimpleAdmin.Instance.OnDelGroupCommand),
-        new("css_reloadadmins", CS2_SimpleAdmin.Instance.OnRelAdminCommand),
-        new("css_reloadbans", CS2_SimpleAdmin.Instance.OnRelBans),
-        new("css_hide", CS2_SimpleAdmin.Instance.OnHideCommand),
-        new("css_hidecomms", CS2_SimpleAdmin.Instance.OnHideCommsCommand),
-        new("css_who", CS2_SimpleAdmin.Instance.OnWhoCommand),
-        new("css_disconnected", CS2_SimpleAdmin.Instance.OnDisconnectedCommand),
-        new("css_warns", CS2_SimpleAdmin.Instance.OnWarnsCommand),
-        new("css_history", CS2_SimpleAdmin.Instance.OnHistoryCommand),
-        new("css_players", CS2_SimpleAdmin.Instance.OnPlayersCommand),
-        new("css_kick", CS2_SimpleAdmin.Instance.OnKickCommand),
-        new("css_map", CS2_SimpleAdmin.Instance.OnMapCommand),
-        new("css_wsmap", CS2_SimpleAdmin.Instance.OnWorkshopMapCommand),
-        new("css_cvar", CS2_SimpleAdmin.Instance.OnCvarCommand),
-        new("css_rcon", CS2_SimpleAdmin.Instance.OnRconCommand),
-        new("css_rr", CS2_SimpleAdmin.Instance.OnRestartCommand),
-
-        new("css_gag", CS2_SimpleAdmin.Instance.OnGagCommand),
-        new("css_addgag", CS2_SimpleAdmin.Instance.OnAddGagCommand),
-        new("css_ungag", CS2_SimpleAdmin.Instance.OnUngagCommand),
-        new("css_mute", CS2_SimpleAdmin.Instance.OnMuteCommand),
-        new("css_addmute", CS2_SimpleAdmin.Instance.OnAddMuteCommand),
-        new("css_unmute", CS2_SimpleAdmin.Instance.OnUnmuteCommand),
-        new("css_silence", CS2_SimpleAdmin.Instance.OnSilenceCommand),
-        new("css_addsilence", CS2_SimpleAdmin.Instance.OnAddSilenceCommand),
-        new("css_unsilence", CS2_SimpleAdmin.Instance.OnUnsilenceCommand),
-
-        new("css_vote", CS2_SimpleAdmin.Instance.OnVoteCommand),
-
-        new("css_slay", CS2_SimpleAdmin.Instance.OnSlayCommand),
-        new("css_slap", CS2_SimpleAdmin.Instance.OnSlapCommand),
-        new("css_team", CS2_SimpleAdmin.Instance.OnTeamCommand),
-        new("css_rename", CS2_SimpleAdmin.Instance.OnRenameCommand),
-        new("css_prename", CS2_SimpleAdmin.Instance.OnPrenameCommand),
-        new("css_tp", CS2_SimpleAdmin.Instance.OnGotoCommand),
-        new("css_bring", CS2_SimpleAdmin.Instance.OnBringCommand),
-        new("css_pluginsmanager", CS2_SimpleAdmin.Instance.OnPluginManagerCommand),
-        new("css_adminvoice", CS2_SimpleAdmin.Instance.OnAdminVoiceCommand)
-    ];
+    private static readonly List<CommandMapping> CommandMappings = CommandCatalog.Entries
+        .Select(e => new CommandMapping(e.Key, (CommandInfo.CommandCallback)Delegate.CreateDelegate(
+            typeof(CommandInfo.CommandCallback), CS2_SimpleAdmin.Instance, e.Method)))
+        .ToList();
 
     /// <summary>
     /// Initializes command registration.
@@ -101,63 +44,7 @@ public static class RegisterCommands
     {
         var commands = new CommandsConfig
         {
-            Commands = new Dictionary<string, Command>
-            {
-                { "css_ban", new Command { Aliases = ["css_ban"] } },
-                { "css_addban", new Command { Aliases = ["css_addban"] } },
-                { "css_banip", new Command { Aliases = ["css_banip"] } },
-                { "css_unban", new Command { Aliases = ["css_unban"] } },
-                { "css_warn", new Command { Aliases = ["css_warn"] } },
-                { "css_unwarn", new Command { Aliases = ["css_unwarn"] } },
-                { "css_asay", new Command { Aliases = ["css_asay"] } },
-                { "css_cssay", new Command { Aliases = ["css_cssay"] } },
-                { "css_say", new Command { Aliases = ["css_say"] } },
-                { "css_psay", new Command { Aliases = ["css_psay"] } },
-                { "css_csay", new Command { Aliases = ["css_csay"] } },
-                { "css_hsay", new Command { Aliases = ["css_hsay"] } },
-                { "css_penalties", new Command { Aliases = ["css_penalties", "css_mypenalties", "css_comms"] } },
-                { "css_admin", new Command { Aliases = ["css_admin"] } },
-                { "css_adminhelp", new Command { Aliases = ["css_adminhelp"] } },
-                { "css_addadmin", new Command { Aliases = ["css_addadmin"] } },
-                { "css_deladmin", new Command { Aliases = ["css_deladmin"] } },
-                { "css_addgroup", new Command { Aliases = ["css_addgroup"] } },
-                { "css_delgroup", new Command { Aliases = ["css_delgroup"] } },
-                { "css_reloadadmins", new Command { Aliases = ["css_reloadadmins"] } },
-                { "css_reloadbans", new Command { Aliases = ["css_reloadbans"] } },
-                { "css_hide", new Command { Aliases = ["css_hide", "css_stealth"] } },
-                { "css_hidecomms", new Command { Aliases = ["css_hidecomms"] } },
-                { "css_who", new Command { Aliases = ["css_who"] } },
-                { "css_disconnected", new Command { Aliases = ["css_disconnected", "css_last"] } },
-                { "css_warns", new Command { Aliases = ["css_warns"] } },
-                { "css_history", new Command { Aliases = ["css_history", "css_penaltyhistory"] } },
-                { "css_players", new Command { Aliases = ["css_players"] } },
-                { "css_kick", new Command { Aliases = ["css_kick"] } },
-                { "css_map", new Command { Aliases = ["css_map", "css_changemap"] } },
-                { "css_wsmap", new Command { Aliases = ["css_wsmap", "css_changewsmap", "css_workshop"] } },
-                { "css_cvar", new Command { Aliases = ["css_cvar"] } },
-                { "css_rcon", new Command { Aliases = ["css_rcon"] } },
-                { "css_rr", new Command { Aliases = ["css_rr", "css_rg", "css_restart", "css_restartgame"] } },
-                { "css_gag", new Command { Aliases = ["css_gag"] } },
-                { "css_addgag", new Command { Aliases = ["css_addgag"] } },
-                { "css_ungag", new Command { Aliases = ["css_ungag"] } },
-                { "css_mute", new Command { Aliases = ["css_mute"] } },
-                { "css_addmute", new Command { Aliases = ["css_addmute"] } },
-                { "css_unmute", new Command { Aliases = ["css_unmute"] } },
-                { "css_silence", new Command { Aliases = ["css_silence"] } },
-                { "css_addsilence", new Command { Aliases = ["css_addsilence"] } },
-                { "css_unsilence", new Command { Aliases = ["css_unsilence"] } },
-                { "css_vote", new Command { Aliases = ["css_vote"] } },
-                { "css_slay", new Command { Aliases = ["css_slay"] } },
-                { "css_slap", new Command { Aliases = ["css_slap"] } },
-                { "css_team", new Command { Aliases = ["css_team"] } },
-                { "css_rename", new Command { Aliases = ["css_rename"] } },
-                { "css_prename", new Command { Aliases = ["css_prename"] } },
-                { "css_resize", new Command { Aliases = ["css_resize", "css_size"] } },
-                { "css_tp", new Command { Aliases = ["css_tp", "css_tpto", "css_goto"] } },
-                { "css_bring", new Command { Aliases = ["css_bring", "css_tphere"] } },
-                { "css_pluginsmanager", new Command { Aliases = ["css_pluginsmanager", "css_pluginmanager"] } },
-                { "css_adminvoice", new Command { Aliases = ["css_adminvoice", "css_listenall"] } }
-            }
+            Commands = CommandCatalog.DefaultAliases.ToDictionary(kv => kv.Key, kv => new Command { Aliases = kv.Value })
         };
         
         var options = new JsonSerializerOptions
@@ -177,34 +64,21 @@ public static class RegisterCommands
     [UnconditionalSuppressMessage("Trimming", "IL2026:Members annotated with 'RequiresUnreferencedCodeAttribute' require dynamic access otherwise can break functionality when trimming application code", Justification = "<Pending>")]
     private static void Register()
     {
-        GagChatCommands.ResetOwn();
         var json = File.ReadAllText(CommandsPath);
         var commandsConfig = JsonSerializer.Deserialize<CommandsConfig>(json, 
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
+        var registered = new List<(string Key, string Alias)>();
         if (commandsConfig?.Commands != null)
         {
-            foreach (var command in commandsConfig.Commands)
+            foreach (var (key, aliases) in CommandCatalog.ResolveAliases(commandsConfig.Commands.ToDictionary(c => c.Key, c => c.Value?.Aliases)))
             {
-                // fork: `"css_x": null` (or null aliases) in a hand-edited Commands.json used to throw a
-                // NullReferenceException here and abort registration of every command after it.
-                var aliases = command.Value?.Aliases?.Where(a => !string.IsNullOrWhiteSpace(a)).ToArray();
-                if (aliases == null)
-                {
-                    CS2_SimpleAdmin._logger?.LogWarning($"Commands.json: `{command.Key}` has no aliases, skipped");
-                    continue;
-                }
-            
-                CS2_SimpleAdmin._logger?.LogInformation(
-                    $"Registering command: `{command.Key}` with aliases: `{string.Join(", ", aliases)}`");
-            
-                var mapping = CommandMappings.FirstOrDefault(m => m.CommandKey == command.Key);
-                if (mapping == null || aliases.Length == 0) continue;
-            
+                CS2_SimpleAdmin._logger?.LogInformation($"Registering command: `{key}` with aliases: `{string.Join(", ", aliases)}`");
+                var mapping = CommandMappings.First(m => m.CommandKey == key);
                 foreach (var alias in aliases)
                 {
                     CS2_SimpleAdmin.Instance.AddCommand(alias, "", mapping.Callback);
-                    GagChatCommands.NoteRegistered(mapping.CommandKey, alias);
+                    registered.Add((key, alias));
                 }
             }
 
@@ -213,9 +87,12 @@ public static class RegisterCommands
             {
                 CS2_SimpleAdmin._logger?.LogInformation($"Registering command: `{mapping.CommandKey}` (not in Commands.json, using default alias)");
                 CS2_SimpleAdmin.Instance.AddCommand(mapping.CommandKey, "", mapping.Callback);
-                GagChatCommands.NoteRegistered(mapping.CommandKey, mapping.CommandKey);
+                registered.Add((mapping.CommandKey, mapping.CommandKey));
             }
         }
+
+        // Classification by key, published once per registration: the command listener only looks names up
+        OwnCommands.Replace(registered);
         
         foreach (var (name, definitions) in CustomCommandRegistry.Definitions)
         {

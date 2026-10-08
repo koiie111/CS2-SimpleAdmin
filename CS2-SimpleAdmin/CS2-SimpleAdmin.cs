@@ -64,29 +64,14 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
             // OnGameServerSteamAPIActivated();
             OnMapStart(string.Empty);
 
-            AddTimer(6.0f, () =>
-            {
-                if (DatabaseProvider == null) return;
-                
-                PlayersInfo.Clear();
-                CachedPlayers.Clear();
-                BotPlayers.Clear();
-                Runtime.Sessions.Clear();
-                
-                foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p is { Connected: PlayerConnectedState.Connected, IsHLTV: false }).ToArray()) 
-                {
-                    if (!player.IsBot)
-                    {
-                        if (!CachedPlayers.Contains(player))
-                            CachedPlayers.Add(player);
-                        PlayerManager.LoadPlayerData(player, true);
-                    }
-                    else
-                        BotPlayers.Add(player);
-                };
-            });
-            
         }
+
+        // Players who are already connected (hot reload, css_plugins load mid-map) get their sessions right now, not after a
+        // timer: from here on their connection is "unverified" (no free text, see ChatGuard) until their penalties are read
+        // from the shared database, and their verification deadline starts counting. CounterStrikeSharp loads a reloaded
+        // plugin into a fresh AssemblyLoadContext, so nothing of the previous instance's penalty state can be carried over;
+        // the database is the only source, and until it answers the conservative state is "no text".
+        AdoptConnectedPlayers();
         _cBasePlayerControllerSetPawnFunc = new MemoryFunctionVoid<CBasePlayerController, CCSPlayerPawn, bool, bool>(GameData.GetSignature("CBasePlayerController_SetPawn"));
 
         SimpleAdminApi = new Api.CS2_SimpleAdminApi();
@@ -101,6 +86,27 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
 
         Menus.MenuManager.Instance.InitializeDefaultCategories();
         BasicMenu.Initialize();
+    }
+
+    /// <summary>Game thread: starts the verified-connection flow for every human that is connected right now.</summary>
+    private void AdoptConnectedPlayers()
+    {
+        PlayersInfo.Clear();
+        CachedPlayers.Clear();
+        BotPlayers.Clear();
+        Runtime.Sessions.Clear();
+
+        foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p is { Connected: PlayerConnectedState.Connected, IsHLTV: false }).ToArray())
+        {
+            if (player.IsBot)
+            {
+                BotPlayers.Add(player);
+                continue;
+            }
+
+            CachedPlayers.Add(player);
+            PlayerManager.LoadPlayerData(player, true);
+        }
     }
 
     public override void OnAllPluginsLoaded(bool hotReload)

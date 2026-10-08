@@ -133,6 +133,42 @@ internal static class PeriodicMaintenance
         return credits;
     }
 
+    /// <summary>Test seam: kick of a banned online connection (game thread). Production: <see cref="Helper.KickPlayer"/>.</summary>
+    internal static Action<PlayerSession> KickBannedOnline { get; set; } = static session =>
+    {
+        if (PlayerManager.ResolveController(session) is { } player)
+            Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED);
+        else
+            Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
+    };
+
+    /// <summary>
+    /// Online players with an active ban of their own SteamID64 in the shared database are disconnected: one bounded batch
+    /// read per <see cref="BanDecider.BatchSize"/> players, then one game-thread item that kicks the exact connections
+    /// (slot + SteamID + userid + session still current). A failed read is logged and retried by the next pass; it never kicks.
+    /// </summary>
+    internal static async Task EnforceBansAsync(Database.IDatabaseProvider provider, List<PlayerSession> sessions, CancellationToken ct)
+    {
+        HashSet<ulong> banned;
+        try
+        {
+            banned = await BanDecider.FindBannedAsync(provider, sessions.Select(s => s.SteamId).ToList(), Time.ActualDateTime(), ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            RateLimitedLog.Error("periodic.ban-check", ex, "Unable to check online players against the ban table");
+            return;
+        }
+
+        if (banned.Count == 0) return;
+        var targets = sessions.Where(s => banned.Contains(s.SteamId)).ToList();
+        await Runtime.OnGameThread(() =>
+        {
+            foreach (var session in targets) KickBannedOnline(session);
+        }).ConfigureAwait(false);
+    }
+
     private static async Task RunAsync(CS2_SimpleAdmin plugin, CS2_SimpleAdminConfig config,
         List<PlayerSession> sessions, List<SessionCredit> credits, CancellationToken ct)
     {
@@ -143,7 +179,7 @@ internal static class PeriodicMaintenance
             // them EXPIRED in SQL, and if it failed that step is skipped so no used-up mute escapes the report.
             var onlineOk = true;
             if (config.OtherSettings.TimeMode == 0 && credits.Count > 0)
-                onlineOk = await Step("online-mutes", () => ApplyOnlineTimeAsync(plugin, credits, ct)).ConfigureAwait(false);
+                onlineOk = await Step("online-mutes", () => ApplyOnlineTimeAsync(plugin, config, credits, ct)).ConfigureAwait(false);
 
             // Dependent pair, in order
             await Step("expire-bans", () => plugin.BanManager.ExpireOldBans()).ConfigureAwait(false);
@@ -157,53 +193,10 @@ internal static class PeriodicMaintenance
             await Step("expire-warns", () => plugin.WarnManager.ExpireOldWarns()).ConfigureAwait(false);
             await Step("expire-admins", () => plugin.PermissionManager.DeleteOldAdmins()).ConfigureAwait(false);
 
-            // Online players banned meanwhile (site, other servers): kick the exact connections that were checked. The cache
-            // (refreshed above) proposes, the database confirms: a ban lifted elsewhere since the refresh must not kick anyone.
-            if (cache != null && sessions.Count > 0)
-            {
-                var now = Time.ActualDateTime();
-                var candidates = new List<(PlayerSession Session, int BanId)>();
-                foreach (var session in sessions)
-                    if (cache.CheckBan(config, session.SteamId, session.IpAddress, now) is { IsBanned: true, Ban: { } ban })
-                        candidates.Add((session, ban.Id));
-
-                var banned = new List<PlayerSession>();
-                if (candidates.Count > 0)
-                {
-                    HashSet<int> confirmed;
-                    try
-                    {
-                        confirmed = await BanDecider.ConfirmActiveAsync(CS2_SimpleAdmin.DatabaseProvider!,
-                            candidates.Select(c => c.BanId).ToList(), now, ct).ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        // Unverifiable: neither kick on an old cache entry nor forget the candidates; the next pass asks again
-                        RateLimitedLog.Error("periodic.ban-confirm", ex, "Unable to confirm cached bans of online players");
-                        confirmed = [];
-                    }
-
-                    foreach (var (session, banId) in candidates)
-                        if (confirmed.Contains(banId))
-                            banned.Add(session);
-                }
-
-                if (banned.Count > 0)
-                    await Runtime.OnGameThread(() =>
-                    {
-                        foreach (var session in banned)
-                        {
-                            var player = PlayerManager.ResolveController(session);
-                            if (player == null)
-                            {
-                                Interlocked.Increment(ref PluginMetrics.StaleSessionResults);
-                                continue;
-                            }
-
-                            Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_BANNED);
-                        }
-                    }).ConfigureAwait(false);
-            }
+            // Online players banned meanwhile (site, other servers): the database decides, by SteamID, for exactly the
+            // connections that were snapshotted; the cache is not consulted and IP addresses never ban.
+            if (sessions.Count > 0)
+                await EnforceBansAsync(CS2_SimpleAdmin.DatabaseProvider!, sessions, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -241,6 +234,7 @@ internal static class PeriodicMaintenance
             {
                 var rows = await CS2_SimpleAdmin.Instance.MuteManager
                     .GetActiveMutesAsync(session.SteamId, timeMode, Time.ActualDateTime(), ct).ConfigureAwait(false);
+                if (SyncHook != null) await SyncHook("after-read", session.SteamId).ConfigureAwait(false);
                 await Runtime.OnGameThread(() => ApplySyncResult(session, revision, rows)).ConfigureAwait(false);
                 return true;
             }, session.SteamId);
@@ -248,6 +242,9 @@ internal static class PeriodicMaintenance
             if (queued == null) Interlocked.Increment(ref PluginMetrics.MuteSyncRefused);
         }
     }
+
+    /// <summary>Test seam: awaited inside the ordered sync job between the database read and the game-thread apply.</summary>
+    internal static Func<string, ulong, Task>? SyncHook { get; set; }
 
     /// <summary>Game thread: voice effect of a sync (seam; production changes only <c>VoiceFlags.Muted</c> of the controller).</summary>
     internal static Action<PlayerSession, bool> VoiceEffect { get; set; } = static (session, muted) =>
@@ -284,7 +281,21 @@ internal static class PeriodicMaintenance
         else if (released) VoiceEffect(session, false);
     }
 
-    private static async Task ApplyOnlineTimeAsync(CS2_SimpleAdmin plugin, List<SessionCredit> credits, CancellationToken ct)
+    /// <summary>
+    /// TimeMode 0. Credits the online minutes (idempotent compare-and-set, see <see cref="OnlineCredit"/>), reads which mutes
+    /// are now used up and then lets <b>a fresh read in each affected player's ordered lane</b> decide the in-memory state.
+    /// <para>
+    /// This pass deliberately does <b>not</b> mark entries "passed" from its own read. That read is unordered with respect to
+    /// the per-player sync/command/connect jobs, so an application of it could be overtaken by an older sync (which would
+    /// bring an expired mute back, scenario A) or applied to a row that was extended meanwhile under the same id (scenario
+    /// B). The follow-up sync takes its place in the player's lane when the game thread accepts it, so it runs after every
+    /// earlier sync (whose apply is part of that job) and reads the row as it is <i>now</i>: used up → entry dropped and the
+    /// voice released at once; extended → entry follows the new duration. A refused follow-up (full queue) only delays the
+    /// release until the next pass, which syncs every loaded player anyway: never in the unsafe direction.
+    /// </para>
+    /// </summary>
+    internal static async Task ApplyOnlineTimeAsync(CS2_SimpleAdmin plugin, CS2_SimpleAdminConfig config, List<SessionCredit> credits,
+        CancellationToken ct)
     {
         var batch = new List<OnlineCredit>(credits.Count);
         foreach (var credit in credits) batch.Add(credit.Credit);
@@ -304,15 +315,15 @@ internal static class PeriodicMaintenance
                 credit.Session.PendingCredit = null;
             }
 
+            if (expired.Count == 0) return;
+            var affected = new List<PlayerSession>();
             foreach (var row in expired)
             {
                 var session = Runtime.Sessions.FindBySteamId((ulong)row.SteamId);
-                if (session == null) continue;
-                // Exactly the row the database used up; the end time only identifies it for entries without a row id
-                if (row.Id > 0 && PlayerPenaltyManager.MarkPassedByDbId(session.Slot, row.Id)) continue;
-                if (row.Ends == null) continue;
-                PlayerPenaltyManager.RemovePenaltiesByDateTime(session.Slot, row.Ends.Value);
+                if (session != null && !affected.Contains(session)) affected.Add(session);
             }
+
+            QueueMuteSync(config, affected);
         }).ConfigureAwait(false);
     }
 

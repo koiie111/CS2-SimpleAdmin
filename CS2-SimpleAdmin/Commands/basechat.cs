@@ -1,4 +1,5 @@
 ﻿using CounterStrikeSharp.API.Core;
+using CS2_SimpleAdmin.Infrastructure;
 using CounterStrikeSharp.API.Core.Translations;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
@@ -21,6 +22,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminToAdminSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         Helper.LogCommand(caller, command);
 
         var utf8BytesString = Encoding.UTF8.GetBytes(command.GetCommandString[command.GetCommandString.IndexOf(' ')..]);
@@ -45,6 +49,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminCustomSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         if (command.GetCommandString[command.GetCommandString.IndexOf(' ')..].Length == 0) return;
 
         var utf8BytesString = Encoding.UTF8.GetBytes(command.GetCommandString[command.GetCommandString.IndexOf(' ')..]);
@@ -67,6 +74,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         if (command.GetCommandString[command.GetCommandString.IndexOf(' ')..].Length == 0) return;
 
         var utf8BytesString = Encoding.UTF8.GetBytes(command.GetCommandString[command.GetCommandString.IndexOf(' ')..]);
@@ -93,6 +103,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminPrivateSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
 
         var targets = GetTarget(command);
@@ -124,6 +137,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminCenterSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         var utf8BytesString = Encoding.UTF8.GetBytes(command.GetCommandString[command.GetCommandString.IndexOf(' ')..]);
         var utf8String = Encoding.UTF8.GetString(utf8BytesString);
 
@@ -140,6 +156,9 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/chat")]
     public void OnAdminHudSayCommand(CCSPlayerController? caller, CommandInfo command)
     {
+        // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
+        if (!ChatGuard.MayPublish(caller)) return;
+
         var utf8BytesString = Encoding.UTF8.GetBytes(command.GetCommandString[command.GetCommandString.IndexOf(' ')..]);
         var utf8String = Encoding.UTF8.GetString(utf8BytesString);
 

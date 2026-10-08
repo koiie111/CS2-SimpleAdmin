@@ -304,13 +304,9 @@ public partial class CS2_SimpleAdmin
         }
         else
         {
-            // Asynchronous ban operation if player is not online or not found
-            if (!TryQueuePenaltyWork(caller, null, "ban-write", async _ =>
-            {
-                await BanManager.AddBanByIp(ipAddress, adminInfo, reason, time);
-            })) return;
-
-            command.ReplyToCommand($"Player with ip {ipAddress} is not online. Ban has been added offline.");
+            // IP addresses never ban: a row without a SteamID would not be enforced by anything, so none is written
+            command.ReplyToCommand($"No online player has the IP {ipAddress}. IP addresses are not banned (only SteamIDs are): use css_addban <steamid> for an offline player.");
+            return;
         }
 
         Helper.LogCommand(caller, command);
@@ -428,13 +424,6 @@ public partial class CS2_SimpleAdmin
             ? caller.PlayerName 
             : (_localizer?["sa_console"] ?? "Console");
 
-        // Freeze player pawn if alive
-        if (player.PlayerPawn?.Value?.LifeState == (int)LifeState_t.LIFE_ALIVE)
-        {
-            player.PlayerPawn?.Value?.Freeze();
-            AddTimer(5.0f, () => player.PlayerPawn?.Value?.Unfreeze(), CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
-        }
-
         // Get player and admin information
         var playerInfo = GetPlayerInfo(player);
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
@@ -471,6 +460,13 @@ public partial class CS2_SimpleAdmin
                 }
             }
         })) return;
+
+        // Freeze player pawn if alive (only after the work was accepted: a refusal changes nothing)
+        if (player.PlayerPawn?.Value?.LifeState == (int)LifeState_t.LIFE_ALIVE)
+        {
+            player.PlayerPawn?.Value?.Freeze();
+            AddTimer(5.0f, () => player.PlayerPawn?.Value?.Unfreeze(), CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+        }
 
         // Determine message keys and arguments based on warning time
         var (messageKey, activityMessageKey, centerArgs, adminActivityArgs) = time == 0

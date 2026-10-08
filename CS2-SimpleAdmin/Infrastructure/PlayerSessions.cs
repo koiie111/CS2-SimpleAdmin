@@ -9,7 +9,8 @@ namespace CS2_SimpleAdmin.Infrastructure;
 /// <see cref="PlayerSessions.IsCurrent"/> before applying anything, so a result never lands on a player that
 /// disconnected, on another account that reused the slot, or on a new connection of the same account.
 /// </summary>
-internal sealed class PlayerSession(long id, int slot, ulong steamId, int userId, string name, string? ipAddress)
+internal sealed class PlayerSession(long id, int slot, ulong steamId, int userId, string name, string? ipAddress,
+    long connectedTimestamp = 0, bool deadlineArmed = false)
 {
     public long Id { get; } = id;
     public int Slot { get; } = slot;
@@ -18,6 +19,16 @@ internal sealed class PlayerSession(long id, int slot, ulong steamId, int userId
     public string Name { get; } = name;
     public string? IpAddress { get; } = ipAddress;
     public long StartedTimestamp { get; } = Stopwatch.GetTimestamp();
+
+    /// <summary>
+    /// Stopwatch timestamp at which the <b>connection</b> (slot + userid) was first seen by the plugin. A session created
+    /// when a SteamID 0 connection gets its confirmed SteamID inherits it, so the verification deadline is one budget for
+    /// the whole connection and is never restarted by authorization events or retries.
+    /// </summary>
+    public long ConnectedTimestamp { get; } = connectedTimestamp != 0 ? connectedTimestamp : Stopwatch.GetTimestamp();
+
+    /// <summary>The verification-deadline timer of this connection was scheduled (game thread; inherited, see <see cref="ConnectedTimestamp"/>).</summary>
+    public bool DeadlineArmed { get; set; } = deadlineArmed;
 
     // ---- connect load state machine (game thread only) ----
     // Pending ──TryBeginLoad──▶ InFlight ──CompleteLoad──▶ Loaded
@@ -152,7 +163,10 @@ internal sealed class PlayerSessions
             return existing;
         }
 
-        var session = new PlayerSession(Interlocked.Increment(ref _nextId), slot, steamId, userId, name, ipAddress);
+        // Same connection (slot + userid) whose SteamID was still 0: one deadline budget for the whole connection
+        var inherit = existing != null && existing.UserId == userId && existing.SteamId == 0 && steamId != 0 ? existing : null;
+        var session = new PlayerSession(Interlocked.Increment(ref _nextId), slot, steamId, userId, name, ipAddress,
+            inherit?.ConnectedTimestamp ?? 0, inherit?.DeadlineArmed ?? false);
         Volatile.Write(ref _bySlot[slot], session);
         created = true;
         return session;

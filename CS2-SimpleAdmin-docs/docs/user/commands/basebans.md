@@ -74,7 +74,7 @@ css_banip 10.0.0.5 0 "Persistent troublemaker"
 **Notes:**
 - Useful for preventing ban evasion
 - Can be combined with SteamID bans
-- Check config for `BanType` setting (SteamID, IP, or Both)
+- IP addresses are not enforced: the command bans the SteamIDs of online players with that IP; for an address with no player online nothing is written
 
 ---
 
@@ -228,9 +228,7 @@ All ban commands support advanced targeting:
 ### Multi-Account Detection
 
 When `CheckMultiAccountsByIp` is enabled:
-- Plugin detects multiple accounts from same IP
-- Sends Discord notifications if configured
-- Helps identify ban evasion
+- Admins get a notice about accounts associated with the connecting IP (information only, nobody is banned for an IP)
 
 ## Troubleshooting
 

@@ -37,7 +37,8 @@ internal class PlayerManager
 
     /// <summary>
     /// How long a connection may stay unverified (its ban/mute state could not be read) before it is disconnected.
-    /// Counted from the moment the SteamID is known. An unreadable database, a full queue, a plugin that is not ready or
+    /// Counted from the moment the plugin first sees the connection (also while its SteamID is still 0) and never restarted.
+    /// An unreadable database, a full queue, a plugin that is not ready or
     /// an unfinished authorization are never proof that a player is unpunished; they only delay the check, and the delay
     /// is bounded.
     /// </summary>
@@ -71,13 +72,14 @@ internal class PlayerManager
 
         var session = Runtime.Sessions.BeginOrGet(player.Slot, steamId, player.UserId.Value, playerName, ipAddress, out var created);
 
+        // The verification deadline belongs to the connection, not to the SteamID: armed once, counted from the first
+        // time the connection was seen, inherited by the session that gets the confirmed SteamID. Whatever happens to the
+        // database or to authorization, the connection is either verified by then or disconnected.
+        ArmVerificationDeadline(session);
+
         // Authorization is not finished: nothing can be verified for SteamID 0, and "no record" would mean nothing. A later
         // connect event (OnClientAuthorized / player_connect_full) brings the real SteamID and starts the verified session.
         if (steamId == 0) return;
-
-        // The verification deadline belongs to the session: whatever happens to the database, the connection is either
-        // verified by then or disconnected
-        if (created) ScheduleVerificationDeadline(session);
 
         // connect + authorized + player_connect_full of one connection share one load; a load that failed is retried by
         // its own backoff timer, not by the next connect event
@@ -109,11 +111,22 @@ internal class PlayerManager
             Helper.KickPlayer(player, NetworkDisconnectionReason.NETWORK_DISCONNECT_REJECT_INVALIDCONNECTION);
     };
 
+    /// <summary>Arms the connection's deadline once; a session that inherited the connection (SteamID 0 → confirmed) is already armed.</summary>
+    internal void ArmVerificationDeadline(PlayerSession session)
+    {
+        if (session.DeadlineArmed) return;
+        session.DeadlineArmed = true;
+        ScheduleVerificationDeadline(session);
+    }
+
     internal void ScheduleVerificationDeadline(PlayerSession session)
     {
-        var timeout = VerificationTimeout(CS2_SimpleAdmin.CurrentConfig);
+        // What is left of the connection's budget (a session that inherited the connection keeps the original start)
+        var elapsed = TimeSpan.FromSeconds((double)(Stopwatch.GetTimestamp() - session.ConnectedTimestamp) / Stopwatch.Frequency);
+        var remaining = VerificationTimeout(CS2_SimpleAdmin.CurrentConfig) - elapsed;
+        if (remaining < TimeSpan.Zero) remaining = TimeSpan.Zero;
         var context = Runtime.Context;
-        RetryScheduler(timeout, () =>
+        RetryScheduler(remaining, () =>
         {
             if (context.IsCurrent) EnforceVerificationDeadline(session);
         });
@@ -123,10 +136,15 @@ internal class PlayerManager
     /// Game thread. The deadline of <paramref name="session"/> arrived: a connection that is still current and still not
     /// <see cref="ConnectLoadState.Loaded"/> has not been checked against the shared penalty state and is disconnected.
     /// Nothing is written to the database for it (no ban or mute for an unavailable database).
+    /// <para>
+    /// <paramref name="armed"/> may be an earlier session of the same connection (same slot + userid, SteamID was 0): the
+    /// check applies to the connection's <i>current</i> session, never to another connection that reused the slot.
+    /// </para>
     /// </summary>
-    internal static void EnforceVerificationDeadline(PlayerSession session)
+    internal static void EnforceVerificationDeadline(PlayerSession armed)
     {
-        if (!Runtime.Sessions.IsCurrent(session) || session.LoadState == ConnectLoadState.Loaded) return;
+        var session = Runtime.Sessions.Get(armed.Slot);
+        if (session == null || session.UserId != armed.UserId || session.LoadState == ConnectLoadState.Loaded) return;
         Interlocked.Increment(ref PluginMetrics.UnverifiedKicked);
         CS2_SimpleAdmin._logger?.LogWarning(
             "Disconnecting {Session}: ban/mute state could not be verified within the deadline (load state {State}, {Attempts} attempts, " +
@@ -242,8 +260,8 @@ internal class PlayerManager
         QueueIpSave(session);
 
         var now = Time.ActualDateTime();
-        // The decision comes from the shared database by SteamID; the local cache only adds IP candidates
-        var check = await BanDecider.DecideAsync(provider, cache, config, session.SteamId, session.IpAddress, now, ct).ConfigureAwait(false);
+        // The decision comes from the shared database by SteamID. IP addresses never ban (see BanDecider).
+        var check = await BanDecider.DecideAsync(provider, session.SteamId, now, ct).ConfigureAwait(false);
         if (check.IsBanned)
         {
             CS2_SimpleAdmin._logger?.LogInformation("[BAN CHECK] Player {Name} ({SteamId}) IP: {Ip} is banned (ban #{BanId}, {Match}) - kicking",
@@ -379,25 +397,19 @@ internal class PlayerManager
         };
         CS2_SimpleAdmin.PlayersInfo[session.SteamId] = info;
 
+        // The load is the first authoritative read of this connection: it replaces whatever database-backed state the slot
+        // still holds (a previous occupant whose disconnect was missed) instead of adding to it; entries accepted after
+        // the read (a command issued meanwhile) and API entries stay.
         var voiceMuted = false;
+        var rows = new List<PlayerPenaltyManager.DbPenalty>(result.ActiveMutes.Count);
         foreach (var mute in result.ActiveMutes)
         {
-            var ends = mute.Ends ?? DateTime.MinValue;
-            switch (mute.Type)
-            {
-                case "GAG":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Gag, ends, mute.Duration, result.Revision, mute.Id);
-                    break;
-                case "MUTE":
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Mute, ends, mute.Duration, result.Revision, mute.Id);
-                    voiceMuted = true;
-                    break;
-                default:
-                    PlayerPenaltyManager.AddPenalty(session.Slot, PenaltyType.Silence, ends, mute.Duration, result.Revision, mute.Id);
-                    voiceMuted = true;
-                    break;
-            }
+            var type = mute.Type switch { "GAG" => PenaltyType.Gag, "MUTE" => PenaltyType.Mute, _ => PenaltyType.Silence };
+            if (type != PenaltyType.Gag) voiceMuted = true;
+            rows.Add(new PlayerPenaltyManager.DbPenalty(mute.Id, type, mute.Ends ?? DateTime.MinValue, mute.Duration));
         }
+
+        PlayerPenaltyManager.ReconcileWithDatabase(session.Slot, result.Revision, rows);
 
         NativeEffects(session, info, voiceMuted, false);
     }
@@ -469,8 +481,7 @@ internal class PlayerManager
     private static void QueuePlayerDataUpdate(CS2_SimpleAdminConfig config, PlayerSession session,
         BanCheckResult check, CacheManager cache)
     {
-        var multi = config.OtherSettings.BanType != 0 && config.OtherSettings.CheckMultiAccountsByIp;
-        if (!CacheManager.NeedsPlayerDataUpdate(check, multi, session.IpAddress)) return;
+        if (!CacheManager.NeedsPlayerDataUpdate(check, false, session.IpAddress)) return;
         // Best effort back-fill; dropping it under load only delays filling the ban row's name/IP
         Runtime.TryQueueDb("ban-backfill", ct =>
             cache.UpdatePlayerDataAsync(config, session.Name, session.SteamId, session.IpAddress, ct));

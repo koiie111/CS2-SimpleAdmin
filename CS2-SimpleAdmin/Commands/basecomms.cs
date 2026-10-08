@@ -79,7 +79,9 @@ public partial class CS2_SimpleAdmin
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle gag logic
-        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
+        // The local restriction (and the voice flag) exist only once the queue accepted the write: a refusal (queue full,
+        // plugin not ready) changes nothing in the game and the command ends here with the refusal message
+        if (!LocalPenalty.Issue(() => TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time);
             if (penaltyId == null) await ReportWriteFailureAsync("Gag/mute/silence");
@@ -88,10 +90,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Gag, reason, time,
                     penaltyId);
             });
-        }, orderKey: playerInfo.SteamId.SteamId64)) return;
-
-        // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Gag, Time.ActualDateTime().AddMinutes(time), time, 0);
+        }, orderKey: playerInfo.SteamId.SteamId64), PenaltyType.Gag, player, time, null)) return;
 
         // Determine message keys and arguments based on gag time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0
@@ -378,11 +377,10 @@ public partial class CS2_SimpleAdmin
         var playerInfo = GetPlayerInfo(player);
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
-        // Set player's voice flags to muted
-        player.VoiceFlags |= VoiceFlags.Muted;
-
         // Asynchronously handle mute logic
-        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
+        // The local restriction (and the voice flag) exist only once the queue accepted the write: a refusal (queue full,
+        // plugin not ready) changes nothing in the game and the command ends here with the refusal message
+        if (!LocalPenalty.Issue(() => TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 1);
             if (penaltyId == null) await ReportWriteFailureAsync("Gag/mute/silence");
@@ -391,10 +389,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Mute, reason, time,
                     penaltyId);
             });
-        }, orderKey: playerInfo.SteamId.SteamId64)) return;
-
-        // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Mute, Time.ActualDateTime().AddMinutes(time), time, 0);
+        }, orderKey: playerInfo.SteamId.SteamId64), PenaltyType.Mute, player, time, p => p.VoiceFlags |= VoiceFlags.Muted)) return;
 
         // Determine message keys and arguments based on mute time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0
@@ -685,7 +680,9 @@ public partial class CS2_SimpleAdmin
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
 
         // Asynchronously handle silence logic
-        if (!TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
+        // The local restriction (and the voice flag) exist only once the queue accepted the write: a refusal (queue full,
+        // plugin not ready) changes nothing in the game and the command ends here with the refusal message
+        if (!LocalPenalty.Issue(() => TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
         {
             int? penaltyId = await MuteManager.MutePlayer(playerInfo, adminInfo, reason, time, 2); 
             if (penaltyId == null) await ReportWriteFailureAsync("Gag/mute/silence");
@@ -694,11 +691,7 @@ public partial class CS2_SimpleAdmin
                 SimpleAdminApi?.OnPlayerPenaltiedEvent(playerInfo, adminInfo, PenaltyType.Silence, reason, time,
                     penaltyId);
             });
-        }, orderKey: playerInfo.SteamId.SteamId64)) return;
-
-        // Add penalty to the player's penalty manager
-        PlayerPenaltyManager.AddPenalty(player.Slot, PenaltyType.Silence, Time.ActualDateTime().AddMinutes(time), time, 0);
-        player.VoiceFlags |= VoiceFlags.Muted;
+        }, orderKey: playerInfo.SteamId.SteamId64), PenaltyType.Silence, player, time, p => p.VoiceFlags |= VoiceFlags.Muted)) return;
 
         // Determine message keys and arguments based on silence time (permanent or timed)
         var (messageKey, activityMessageKey, playerArgs, adminActivityArgs) = time == 0

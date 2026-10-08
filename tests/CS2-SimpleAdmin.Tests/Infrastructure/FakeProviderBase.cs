@@ -61,5 +61,5 @@ internal abstract class FakeProviderBase : IDatabaseProvider
     public virtual string GetPenaltyHistoryCountQuery(string? type) => throw new NotSupportedException();
     public virtual string GetActiveMutesBatchQuery(int timeMode) => throw new NotSupportedException();
     public virtual string GetActiveSteamBansQuery() => throw new NotSupportedException();
-    public virtual string GetActiveBansByIdsQuery() => throw new NotSupportedException();
+    public virtual string GetActiveSteamBansBatchQuery() => throw new NotSupportedException();
 }

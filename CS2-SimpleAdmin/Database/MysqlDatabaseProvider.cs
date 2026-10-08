@@ -235,7 +235,7 @@ public class MySqlDatabaseProvider(string connectionString) : IDatabaseProvider
 
     public string GetActiveSteamBansQuery() => SharedQueries.ActiveSteamBans;
 
-    public string GetActiveBansByIdsQuery() => SharedQueries.ActiveBansByIds;
+    public string GetActiveSteamBansBatchQuery() => SharedQueries.ActiveSteamBansBatch;
 
     public string GetMuteStatsQuery() =>
         """

@@ -332,15 +332,29 @@ public partial class CS2_SimpleAdmin
         if (author == null || !author.IsValid || author.IsBot)
             return HookResult.Continue;
 
-        // Fast path: no gag/silence entry for this slot → no clock read, no allocation
-        if (!PlayerPenaltyManager.HasAnyPenalty(author.Slot, PenaltyType.Gag, PenaltyType.Silence))
-            return HookResult.Continue;
+        // Gag/silence in force, or a connection whose penalties have not been read yet: its text is not published
+        return ChatGuard.Evaluate(author.Slot, author.SteamID, author.UserId ?? -1, out _) == ChatRestriction.None
+            ? HookResult.Continue
+            : HookResult.Stop;
+    }
 
-        if (!PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Gag, out _) &&
-            !PlayerPenaltyManager.IsPenalized(author.Slot, PenaltyType.Silence, out _))
-            return HookResult.Continue;
+    /// <summary>
+    /// Game thread. Why this connection may not publish text right now. A connected human without a session of its own
+    /// (plugin loaded mid-map, map change, missed connect event) is adopted here: the session starts its verification and its
+    /// deadline, and until the load completes the player counts as unverified.
+    /// </summary>
+    private static ChatRestriction EvaluateRestriction(CCSPlayerController player, out DateTime? endDateTime)
+    {
+        var userId = player.UserId ?? -1;
+        var restriction = ChatGuard.Evaluate(player.Slot, player.SteamID, userId, out endDateTime);
+        if (restriction == ChatRestriction.Unverified && userId >= 0)
+        {
+            var session = Runtime.Sessions.Get(player.Slot);
+            if (session == null || session.UserId != userId || session.SteamId != player.SteamID)
+                PlayerManager.LoadPlayerData(player);
+        }
 
-        return HookResult.Stop;
+        return restriction;
     }
 
     private HookResult ComamndListenerHandler(CCSPlayerController? player, CommandInfo info)
@@ -393,20 +407,19 @@ public partial class CS2_SimpleAdmin
             return !player.CanTarget(target) ? HookResult.Stop : HookResult.Continue;
         }
 
-        if (!ChatGate.IsSayLike(command))
+        // One lookup in the alias table built at registration (own commands by key) and one substring test for the rest;
+        // everything else (jointeam, buy, ...) leaves here without touching the controller
+        var own = OwnCommands.Classify(command);
+        if (own is OwnCommandClass.Safe or OwnCommandClass.Other || own == OwnCommandClass.None && !ChatGate.IsSayLike(command))
             return HookResult.Continue;
 
         var text = info.GetArg(1);
 
         var checkStart = LatencyHistogram.Now();
-        DateTime? endDateTime = null;
-        var gagged = PlayerPenaltyManager.HasAnyPenalty(player.Slot, PenaltyType.Gag, PenaltyType.Silence) &&
-                     (PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Gag, out endDateTime) ||
-                      PlayerPenaltyManager.IsPenalized(player.Slot, PenaltyType.Silence, out endDateTime));
+        var restriction = EvaluateRestriction(player, out var endDateTime);
         PluginMetrics.ChatPenaltyCheck.RecordSince(checkStart);
 
-        var decision = ChatGate.Decide(command, text, gagged, ChatTriggers.Current,
-            name => GagChatCommands.IsAllowed(name, Config.OtherSettings.GagAllowedChatCommands));
+        var decision = ChatGate.Decide(command, text, restriction, ChatTriggers.Current, Config.OtherSettings.GagAllowedChatCommands);
         switch (decision.Verdict)
         {
             case ChatVerdict.Block:
@@ -416,6 +429,9 @@ public partial class CS2_SimpleAdmin
                 if (_localizer != null && endDateTime is not null)
                     player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
                 return HookResult.Stop;
+            case ChatVerdict.BlockUnverified:
+                player.PrintToChat("[CS2-SimpleAdmin] Chat is unavailable until your penalties are verified.");
+                return HookResult.Stop;
             case ChatVerdict.RunCommand:
                 // The line is dropped before the engine's chat handler (which would publish it and dispatch the command); the
                 // allow-listed command runs here once, as the player, with the usual permission and argument checks
@@ -423,7 +439,7 @@ public partial class CS2_SimpleAdmin
                 return HookResult.Stop;
         }
 
-        if (text[0] != '@') return HookResult.Continue;
+        if (text.Length == 0 || text[0] != '@') return HookResult.Continue;
 
         if (command.Equals("say", StringComparison.OrdinalIgnoreCase) &&
             AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))

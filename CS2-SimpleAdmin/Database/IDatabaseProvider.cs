@@ -55,8 +55,8 @@ public interface IDatabaseProvider
     /// <summary>Authoritative connect-time ban lookup: active, unexpired bans of <c>@PlayerSteamID</c>.</summary>
     string GetActiveSteamBansQuery();
 
-    /// <summary>Which of <c>@ids</c> are still active, unexpired bans (verifies a cached IP match).</summary>
-    string GetActiveBansByIdsQuery();
+    /// <summary>SteamID64s among <c>@ids</c> that have an active, unexpired ban (periodic check of online players).</summary>
+    string GetActiveSteamBansBatchQuery();
     string GetMuteStatsQuery();
     string GetRetrieveMutesQuery();
     string GetUnmuteAdminIdQuery();

@@ -215,7 +215,7 @@ public class SqliteDatabaseProvider(string filePath) : IDatabaseProvider
 
     public string GetActiveSteamBansQuery() => SharedQueries.ActiveSteamBans;
 
-    public string GetActiveBansByIdsQuery() => SharedQueries.ActiveBansByIds;
+    public string GetActiveSteamBansBatchQuery() => SharedQueries.ActiveSteamBansBatch;
 
     public string GetMuteStatsQuery() =>
         """

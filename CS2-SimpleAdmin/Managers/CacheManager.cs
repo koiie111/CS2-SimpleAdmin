@@ -509,7 +509,9 @@ internal class CacheManager : IDisposable
     }
 
     /// <summary>
-    /// Ban check for a connecting/online player against one snapshot. Also returns whether the matched ban row is
+    /// Cache-only ban check against one snapshot (SteamID and, per config, IP rules). <b>Not used for enforcement</b>: bans
+    /// are decided by the database, by SteamID only (<see cref="BanDecider"/>). Kept for the cache's own diagnostics/tests.
+    /// Also returns whether the matched ban row is
     /// missing the player's IP/SteamID/name (the caller then queues <see cref="UpdatePlayerDataAsync"/>, as before).
     /// </summary>
     public BanCheckResult CheckBan(CS2_SimpleAdminConfig config, ulong steamId, string? ipAddress, DateTime now)
@@ -523,21 +525,6 @@ internal class CacheManager : IDisposable
                 ? snapshot.CheckPlayerOrAnyIp(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, true, now)
                 : snapshot.CheckPlayer(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, now)
         };
-    }
-
-    /// <summary>
-    /// The IP-derived part of <see cref="CheckBan"/> only (BanType &gt; 0): the player's own SteamID ban is deliberately
-    /// not looked at. A connecting player's SteamID ban is decided by the database (<see cref="BanDecider"/>); this
-    /// cache answer supplies the IP candidates, which are verified there as well.
-    /// </summary>
-    public BanCheckResult CheckBanByIpOnly(CS2_SimpleAdminConfig config, ulong steamId, string? ipAddress, DateTime now)
-    {
-        var other = config.OtherSettings;
-        if (other.BanType == 0) return BanCheckResult.NotBanned;
-        var snapshot = Snapshot;
-        return other.CheckMultiAccountsByIp
-            ? snapshot.CheckPlayerOrAnyIp(steamId, ipAddress, other.BanType, other.ExpireOldIpBans, true, now, includeSteamMatch: false)
-            : snapshot.CheckPlayer(null, ipAddress, other.BanType, other.ExpireOldIpBans, now);
     }
 
     /// <summary>Same conditions as the original code for back-filling ban rows with the player's data.</summary>
@@ -572,7 +559,7 @@ internal class CacheManager : IDisposable
                               player_ip = COALESCE(player_ip, @PlayerIP),
                               player_name = COALESCE(player_name, @PlayerName)
                           WHERE
-                              (player_steamid = @PlayerSteamID OR player_ip = @PlayerIP)
+                              player_steamid = @PlayerSteamID
                               AND status = 'ACTIVE'
                               AND (duration = 0 OR ends > @CurrentTime)
                       """;
@@ -599,18 +586,14 @@ internal class CacheManager : IDisposable
         {
             var snapshot = Snapshot;
             var patched = new List<BanRecord>();
-            uint ip = 0;
-            var hasIp = !string.IsNullOrEmpty(ipAddress) && IpHelper.TryConvertIpToUint(ipAddress, out ip);
             foreach (var ban in snapshot.ActiveBans.Values)
             {
-                var bySteam = steamId.HasValue && ban.PlayerSteamId == steamId;
-                var byIp = hasIp && !string.IsNullOrEmpty(ban.PlayerIp) && IpHelper.TryConvertIpToUint(ban.PlayerIp, out var banIp) && banIp == ip;
-                if (!bySteam && !byIp) continue;
+                if (!(steamId.HasValue && ban.PlayerSteamId == steamId)) continue; // IPs never relate a ban to another account
                 var updated = ban with
                 {
                     PlayerIp = string.IsNullOrEmpty(ban.PlayerIp) && playerIp != null ? playerIp : ban.PlayerIp,
                     PlayerName = string.IsNullOrEmpty(ban.PlayerName) && !string.IsNullOrEmpty(playerName) ? playerName : ban.PlayerName,
-                    PlayerSteamId = ban.PlayerSteamId ?? (byIp ? steamId : null)
+                    PlayerSteamId = ban.PlayerSteamId
                 };
                 if (updated != ban) patched.Add(updated);
             }

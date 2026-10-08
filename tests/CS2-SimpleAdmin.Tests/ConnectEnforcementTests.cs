@@ -12,7 +12,7 @@ namespace CS2_SimpleAdmin.Tests;
 /// </summary>
 public class ConnectEnforcementTests
 {
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         public readonly TestWorld World;
         public readonly TestPlugin Plugin;
@@ -74,7 +74,7 @@ public class ConnectEnforcementTests
         }
     }
 
-    private static async Task<(Harness H, FlakyQueriesProvider Provider, TestDatabase Db)> With(bool sqliteWorkers = true,
+    internal static async Task<(Harness H, FlakyQueriesProvider Provider, TestDatabase Db)> With(bool sqliteWorkers = true,
         int dbCapacity = Runtime.DbQueueCapacity, PluginState state = PluginState.Ready, int timeMode = 1, bool multiServerMode = true,
         int banType = 1)
     {
@@ -267,7 +267,7 @@ public class ConnectEnforcementTests
         var session = h.Connect();
         h.Manager.ScheduleVerificationDeadline(session);
         var deadline = Assert.Single(h.Scheduled);
-        Assert.Equal(TimeSpan.FromSeconds(45), deadline.Delay);
+        Assert.InRange(deadline.Delay, TimeSpan.FromSeconds(44), TimeSpan.FromSeconds(45)); // what is left of the connection's budget
 
         h.Manager.QueueLoad(session, Stopwatch.GetTimestamp());     // the database is down: attempt fails, retry is scheduled
         await h.Settle(session);
@@ -467,24 +467,6 @@ public class ConnectEnforcementTests
         await Sync(h, session);
         Assert.Single(PlayerPenaltyManager.GetPlayerPenalties(session.Slot, PenaltyType.Gag));
         Assert.True(gag > 0);
-    }
-
-    [Fact]
-    public async Task OnlineTimeMarksExactlyTheMuteRowThatIsUsedUp()
-    {
-        var (h, _, db) = await With(timeMode: 0);
-        using var _h = h;
-        await using var _db = db;
-        var session = h.Connect();
-        var end = DateTime.Now.AddMinutes(60);
-        var gag = await Net.Mute(db, session.SteamId, "GAG", duration: 60, ends: end);
-        var mute = await Net.Mute(db, session.SteamId, "MUTE", duration: 60, ends: end); // the same end time to the second
-        await h.Load(session);
-
-        Assert.True(PlayerPenaltyManager.MarkPassedByDbId(session.Slot, gag));
-        Assert.False(PlayerPenaltyManager.IsPenalized(session.Slot, PenaltyType.Gag, out _));
-        Assert.True(PlayerPenaltyManager.IsPenalized(session.Slot, PenaltyType.Mute, out _)); // the other row is unaffected
-        Assert.False(PlayerPenaltyManager.MarkPassedByDbId(session.Slot, mute + 1000));
     }
 
     [Fact]

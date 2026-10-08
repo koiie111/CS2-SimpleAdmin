@@ -84,7 +84,7 @@ General plugin settings:
 | `ShowActivityType` | How to display admin actions (0=hide, 1=anonymous, 2=show name) | 2 |
 | `TeamSwitchType` | Team switch behavior | 1 |
 | `KickTime` | Delay before kicking player (seconds) | 5 |
-| `BanType` | Ban type (1=SteamID, 2=IP, 3=Both) | 1 |
+| `BanType` | Legacy: IP addresses never ban (only SteamID64 bans are enforced). `1` still stores the player's IP in new ban rows | 1 |
 | `TimeMode` | Time display mode | 1 |
 | `DisableDangerousCommands` | Disable potentially dangerous commands | true |
 | `MaxBanDuration` | Maximum ban duration in minutes (0=unlimited) | 10080 |
@@ -95,9 +95,9 @@ General plugin settings:
 | `NotifyPenaltiesToAdminOnConnect` | Show penalties to admins when they connect | true |
 | `ShowBanMenuIfNoTime` | Show ban menu even without time parameter | true |
 | `UserMessageGagChatType` | Use UserMessage for gag (alternative chat blocking) | false |
-| `CheckMultiAccountsByIp` | Detect multiple accounts from same IP | true |
+| `CheckMultiAccountsByIp` | Only adds the admin notice about associated accounts; never bans | true |
 | `AdditionalCommandsToLog` | Array of additional commands to log | [] |
-| `IgnoredIps` | IPs to ignore in multi-account detection | [] |
+| `IgnoredIps` | Legacy, not used for bans | [] |
 
 ### Metrics and Updates
 
@@ -145,7 +145,7 @@ where a penalty was issued. Admin permissions and groups keep their own per-serv
 
 Related `OtherSettings`:
 - `UnverifiedConnectionTimeoutSeconds` (default `45`, 10-600): a connection whose ban/mute state cannot be read in time is disconnected; nothing is written for it.
-- `GagAllowedChatCommands` (default `[]`): command names a gagged/silenced player may still run with a chat trigger (`!rank`).
+- `GagAllowedChatCommands` (default `[]`): names of commands of **other plugins** a gagged/silenced player may still run with a chat trigger (`!rank`). This plugin's own commands are decided by a fixed list of verified keys (names listed here are ignored for them).
 
 ### Discord Integration
 

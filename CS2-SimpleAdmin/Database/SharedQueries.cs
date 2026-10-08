@@ -68,10 +68,10 @@ internal static class SharedQueries
         "created AS Created, ends AS Ends, duration AS Duration FROM sa_bans " +
         "WHERE player_steamid = @PlayerSteamID AND status = 'ACTIVE' AND (duration <= 0 OR ends IS NULL OR ends > @CurrentTime) ORDER BY id";
 
-    public const string ActiveBansByIds =
-        "SELECT id AS Id, player_name AS PlayerName, player_steamid AS PlayerSteamId, player_ip AS PlayerIp, status AS Status, " +
-        "created AS Created, ends AS Ends, duration AS Duration FROM sa_bans " +
-        "WHERE id IN @ids AND status = 'ACTIVE' AND (duration <= 0 OR ends IS NULL OR ends > @CurrentTime)";
+    /// <summary>SteamID64s (of the listed ones) that have an active, unexpired ban: the periodic check of online players.</summary>
+    public const string ActiveSteamBansBatch =
+        "SELECT DISTINCT player_steamid FROM sa_bans " +
+        "WHERE player_steamid IN @ids AND status = 'ACTIVE' AND (duration <= 0 OR ends IS NULL OR ends > @CurrentTime)";
 
     /// <summary>Longest reason text the warns menu ever reads from SQL (longer ones are cut there, not after loading).</summary>
     public const int WarnMenuReasonChars = 80;

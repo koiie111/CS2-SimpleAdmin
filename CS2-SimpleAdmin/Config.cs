@@ -203,6 +203,7 @@ public class OtherSettings
     [JsonPropertyName("KickTime")]
     public int KickTime { get; set; } = 5;
 
+    /// <summary>No longer enforces anything: IP addresses never ban (only the SteamID64 of a ban is enforced). Kept so old configs load; 1 still stores the player's IP in new ban rows for the site.</summary>
     [JsonPropertyName("BanType")]
     public int BanType { get; set; } = 1;
 
@@ -240,27 +241,31 @@ public class OtherSettings
 
     /// <summary>
     /// Seconds a connection may stay unverified (ban/mute state not readable: database down, queue full, plugin not
-    /// ready) before it is disconnected. Nothing is written to the database for such a player. Clamped to 10..600.
+    /// ready, authorization not finished) before it is disconnected. Counted from the first time the plugin sees the
+    /// connection and never restarted (also not for a hot reload: from the reload). Until the check completes the player
+    /// cannot publish free text. Nothing is written to the database for such a player. Clamped to 10..600.
     /// </summary>
     [JsonPropertyName("UnverifiedConnectionTimeoutSeconds")]
     public int UnverifiedConnectionTimeoutSeconds { get; set; } = 45;
 
     /// <summary>
     /// Command names (without trigger and without the css_ prefix, e.g. "rank", "top") that a gagged/silenced player may
-    /// still run by typing a chat trigger ("!rank"). Only commands that never relay player text to other players belong
-    /// here. Everything else typed with a trigger by a gagged player is dropped. This plugin's own non-broadcasting
-    /// commands (css_admin, css_penalties, css_history, ...) are always allowed.
+    /// still run by typing a chat trigger ("!rank"). Only commands of <b>other plugins</b> that never relay player text to
+    /// other players belong here. Everything else typed with a trigger by a gagged player is dropped. This plugin's own
+    /// commands are decided by a fixed list of verified keys (css_admin, css_penalties, css_history, css_who, css_players,
+    /// css_warns, css_adminhelp, css_disconnected, css_hide, css_hidecomms), under any alias; names of this plugin's own
+    /// commands in this list are ignored (a dangerous own command cannot be allowed here).
     /// </summary>
     [JsonPropertyName("GagAllowedChatCommands")]
     public List<string> GagAllowedChatCommands { get; set; } = new();
     
-    // fork: off by default. Players joining through mirrors share the mirror IP, so a single banned
-    // account there would lock out everyone else (1.5.x checked bans by SteamID only).
+    // fork: off by default; it only adds the "associated accounts" admin notice. IP addresses never ban anybody.
     [JsonPropertyName("CheckMultiAccountsByIp")]
     public bool CheckMultiAccountsByIp { get; set; } = false;
 
     [JsonPropertyName("AdditionalCommandsToLog")]
     public List<string> AdditionalCommandsToLog { get; set; } = new();
+    /// <summary>No longer used for enforcement (IP addresses never ban); only keeps IPs out of new ban rows.</summary>
     [JsonPropertyName("IgnoredIps")]
     public List<string> IgnoredIps { get; set; } = new();
 }

@@ -96,7 +96,7 @@ public class GlobalPenaltyEnforcementTests
         {
             steam++;
             await Net.Ban(db, steam, serverId: serverId);
-            var result = await BanDecider.DecideAsync(db.Provider, cache, config, steam, "9.9.9.9", now, default);
+            var result = await BanDecider.DecideAsync(db.Provider, steam, now, default);
             Assert.True(result.IsBanned, $"server_id={serverId?.ToString() ?? "NULL"} MultiServerMode={multiServerMode}");
             Assert.Equal(BanMatch.SteamId, result.Match);
         }
@@ -210,7 +210,7 @@ public class GlobalPenaltyEnforcementTests
             var config = Config(engine, banType: banType, multi: multi, ignoredIps: ignored);
             var cache = new CacheManager();
             await cache.InitializeCacheAsync(config, default);
-            var r = await BanDecider.DecideAsync(db.Provider, cache, config, steam, playerIp, now, default);
+            var r = await BanDecider.DecideAsync(db.Provider, steam, now, default);
             Assert.True(r.IsBanned, $"BanType={banType} multi={multi} ip={playerIp} ignored={ignored.Length}");
             Assert.Equal(BanMatch.SteamId, r.Match);
         }
@@ -223,7 +223,7 @@ public class GlobalPenaltyEnforcementTests
         var config = Config(engine);
         var cache = new CacheManager();
         var now = Net.Now();
-        async Task<bool> Banned(ulong s) => (await BanDecider.DecideAsync(db.Provider, cache, config, s, null, now, default)).IsBanned;
+        async Task<bool> Banned(ulong s) => (await BanDecider.DecideAsync(db.Provider, s, now, default)).IsBanned;
 
         const ulong baseId = 76561198100006000;
         await Net.Ban(db, baseId + 1, duration: 0, ends: now.AddYears(-5));                    // permanent: the fictitious ends must not matter
@@ -247,34 +247,52 @@ public class GlobalPenaltyEnforcementTests
     }
 
     [Theory, MemberData(nameof(Engines))]
-    public async Task IpDerivedBansAreCandidatesTheDatabaseMustConfirm(string engine)
+    public async Task IpAddressesNeverBanAnyone(string engine)
     {
         await using var db = await TestDatabases.CreateAsync(engine);
-        var config = Config(engine, banType: 1);
         var now = Net.Now();
         const ulong banned = 76561198100007001, innocent = 76561198100007002;
         var banId = await Net.Ban(db, banned, ip: "5.5.5.5");
+        // two active bans on the same address, one of them on a row that has no SteamID-link to the newcomer at all
+        await Net.Ban(db, banned + 100, ip: "5.5.5.5");
 
-        var cache = new CacheManager();
-        await cache.InitializeCacheAsync(config, default);
-        // BanType 1: the shared IP bans the innocent account...
-        Assert.Equal(BanMatch.Ip, (await BanDecider.DecideAsync(db.Provider, cache, config, innocent, "5.5.5.5", now, default)).Match);
+        // whatever BanType / CheckMultiAccountsByIp / IgnoredIps say, and whatever the (fresh or stale) cache holds
+        foreach (var banType in new[] { 0, 1, 2 })
+        foreach (var multi in new[] { false, true })
+        {
+            var config = Config(engine, banType: banType, multi: multi);
+            var cache = new CacheManager();
+            await cache.InitializeCacheAsync(config, default);
+            Assert.False((await BanDecider.DecideAsync(db.Provider, innocent, now, default)).IsBanned, $"BanType={banType} multi={multi}");
+        }
 
-        // ...until the ban is lifted on another server: the old positive cache entry must not block anyone
-        await Net.Exec(db, "UPDATE sa_bans SET status = 'UNBANNED' WHERE id = @banId", new { banId });
-        Assert.True(cache.CheckBan(config, innocent, "5.5.5.5", now).IsBanned);   // the stale cache still says banned
-        Assert.False((await BanDecider.DecideAsync(db.Provider, cache, config, innocent, "5.5.5.5", now, default)).IsBanned);
-        Assert.False((await BanDecider.DecideAsync(db.Provider, cache, config, banned, "5.5.5.5", now, default)).IsBanned);
+        // a ban row whose IP column changes after caching does not move the ban to another player either
+        await Net.Exec(db, "UPDATE sa_bans SET player_ip = '9.9.9.9' WHERE id = @banId", new { banId });
+        Assert.False((await BanDecider.DecideAsync(db.Provider, innocent, now, default)).IsBanned);
+        Assert.True((await BanDecider.DecideAsync(db.Provider, banned, now, default)).IsBanned);   // its own SteamID, always
 
-        // BanType 0 ignores IPs entirely, IgnoredIps too
-        await Net.Exec(db, "UPDATE sa_bans SET status = 'ACTIVE' WHERE id = @banId", new { banId });
-        await cache.RefreshCacheAsync(config, default);
-        var steamOnly = Config(engine, banType: 0);
-        Assert.False((await BanDecider.DecideAsync(db.Provider, cache, steamOnly, innocent, "5.5.5.5", now, default)).IsBanned);
-        var ignored = Config(engine, banType: 1, ignoredIps: "5.5.5.5");
-        await cache.InitializeCacheAsync(ignored, default);
-        Assert.False((await BanDecider.DecideAsync(db.Provider, cache, ignored, innocent, "5.5.5.5", now, default)).IsBanned);
-        Assert.True((await BanDecider.DecideAsync(db.Provider, cache, ignored, banned, "5.5.5.5", now, default)).IsBanned); // its own SteamID, always
+        // the periodic batch read follows the same rule
+        var set = await BanDecider.FindBannedAsync(db.Provider, [banned, innocent, banned + 100, 0], now, default);
+        Assert.Equal(new HashSet<ulong> { banned, banned + 100 }, set);
+    }
+
+    [Theory, MemberData(nameof(Engines))]
+    public async Task OnlinePlayersAreCheckedInBoundedBatchesAgainstTheLiveTable(string engine)
+    {
+        await using var db = await TestDatabases.CreateAsync(engine);
+        var now = Net.Now();
+        const ulong first = 76561198100020000;
+        var players = Enumerable.Range(0, BanDecider.BatchSize * 2 + 3).Select(i => first + (ulong)i).ToList();
+        await Net.Ban(db, players[0]);                                           // first batch
+        await Net.Ban(db, players[BanDecider.BatchSize + 1], duration: 10, ends: now.AddMinutes(5)); // second batch, running
+        await Net.Ban(db, players[^1]);                                          // third batch
+        await Net.Ban(db, players[5], status: "UNBANNED");                       // lifted elsewhere
+        await Net.Ban(db, players[6], duration: 10, ends: now.AddSeconds(-1));   // elapsed, not yet marked EXPIRED
+
+        var banned = await BanDecider.FindBannedAsync(db.Provider, players, now, default);
+        Assert.Equal(new HashSet<ulong> { players[0], players[BanDecider.BatchSize + 1], players[^1] }, banned);
+        Assert.Empty(await BanDecider.FindBannedAsync(db.Provider, [], now, default));
+        await Assert.ThrowsAnyAsync<Exception>(() => BanDecider.FindBannedAsync(new OutageProvider(), players, now, default));
     }
 
     // ---------------------------------------------------------------- 3. fresh ban between the last refresh and the connection
@@ -291,7 +309,7 @@ public class GlobalPenaltyEnforcementTests
         var now = Net.Now();
 
         Assert.False(cache.CheckBan(config, steam, "7.7.7.7", now).IsBanned);   // the local cache cannot know (the old connect path)
-        var decision = await BanDecider.DecideAsync(db.Provider, cache, config, steam, "7.7.7.7", now, default);
+        var decision = await BanDecider.DecideAsync(db.Provider, steam, now, default);
         Assert.True(decision.IsBanned);                                   // ... and server B refuses the connection at T0 + 2 s
         Assert.Equal(BanMatch.SteamId, decision.Match);
     }
@@ -308,7 +326,7 @@ public class GlobalPenaltyEnforcementTests
         Assert.True(cache.CheckBan(config, steam, null, Net.Now()).IsBanned);
 
         await Net.Exec(db, "UPDATE sa_bans SET status = 'UNBANNED' WHERE id = @id", new { id }); // lifted on the other server
-        Assert.False((await BanDecider.DecideAsync(db.Provider, cache, config, steam, null, Net.Now(), default)).IsBanned);
+        Assert.False((await BanDecider.DecideAsync(db.Provider, steam, Net.Now(), default)).IsBanned);
     }
 
     // ---------------------------------------------------------------- read failures are not "no penalty"
@@ -325,18 +343,18 @@ public class GlobalPenaltyEnforcementTests
         await Net.Mute(db, steam, "GAG");
 
         flaky.FailSteamBans = true;
-        await Assert.ThrowsAnyAsync<Exception>(() => BanDecider.DecideAsync(flaky, cache, config, steam, null, Net.Now(), default));
+        await Assert.ThrowsAnyAsync<Exception>(() => BanDecider.DecideAsync(flaky, steam, Net.Now(), default));
         flaky.FailMutes = true;
         await Assert.ThrowsAnyAsync<Exception>(() => new MuteManager(flaky).GetActiveMutesAsync(steam, 1, Time.ActualDateTime(), default));
         await Assert.ThrowsAnyAsync<Exception>(() => new MuteManager(new OutageProvider()).GetActiveMutesBatchAsync([steam], 1, Time.ActualDateTime(), default));
-        await Assert.ThrowsAnyAsync<Exception>(() => BanDecider.DecideAsync(new OutageProvider(), cache, config, steam, null, Net.Now(), default));
+        await Assert.ThrowsAnyAsync<Exception>(() => BanDecider.DecideAsync(new OutageProvider(), steam, Net.Now(), default));
 
         // SteamID 0 (authorization not finished) cannot be verified either
-        await Assert.ThrowsAsync<InvalidOperationException>(() => BanDecider.DecideAsync(db.Provider, cache, config, 0, null, Net.Now(), default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => BanDecider.DecideAsync(db.Provider, 0, Net.Now(), default));
 
         // and the same reads succeed once the database is fine: "nothing" is an answer only when the read worked
         flaky.FailSteamBans = flaky.FailMutes = false;
-        Assert.True((await BanDecider.DecideAsync(flaky, cache, config, steam, null, Net.Now(), default)).IsBanned);
+        Assert.True((await BanDecider.DecideAsync(flaky, steam, Net.Now(), default)).IsBanned);
         Assert.Single(await new MuteManager(flaky).GetActiveMutesAsync(steam, 1, Time.ActualDateTime(), default));
         Assert.Empty(await new MuteManager(flaky).GetActiveMutesAsync(steam + 1, 1, Time.ActualDateTime(), default)); // a successful empty answer
     }
@@ -411,7 +429,7 @@ public class PenaltyQueriesAreNetworkWideTests
             ["ExpireBans"] = p.GetExpireBansQuery(),
             ["ExpireIpBans"] = p.GetExpireIpBansQuery(),
             ["ActiveSteamBans"] = p.GetActiveSteamBansQuery(),
-            ["ActiveBansByIds"] = p.GetActiveBansByIdsQuery(),
+            ["ActiveSteamBansBatch"] = p.GetActiveSteamBansBatchQuery(),
             ["RetrieveMutes"] = p.GetRetrieveMutesQuery(),
             ["MuteStats"] = p.GetMuteStatsQuery(),
             ["WarnsMenuPage"] = p.GetWarnsMenuPageQuery(),

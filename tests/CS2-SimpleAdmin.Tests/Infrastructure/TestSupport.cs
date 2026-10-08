@@ -135,7 +135,7 @@ internal sealed class FlakyQueriesProvider(IDatabaseProvider inner) : FakeProvid
     public volatile bool FailIpSave;
     public override string GetUpsertPlayerIpQuery() => FailIpSave ? Broken : inner.GetUpsertPlayerIpQuery();
     public override string GetActiveSteamBansQuery() => FailSteamBans ? Broken : inner.GetActiveSteamBansQuery();
-    public override string GetActiveBansByIdsQuery() => inner.GetActiveBansByIdsQuery();
+    public override string GetActiveSteamBansBatchQuery() => inner.GetActiveSteamBansBatchQuery();
     public override string GetExpiredOnlineMutesBatchQuery() => FailExpiredRead ? Broken : inner.GetExpiredOnlineMutesBatchQuery();
     public override string GetOnlineCreditPlanQuery() => FailPlanRead ? Broken : inner.GetOnlineCreditPlanQuery();
     public override string GetApplyOnlineCreditQuery(IReadOnlyList<OnlineCreditStep> steps) => inner.GetApplyOnlineCreditQuery(steps);

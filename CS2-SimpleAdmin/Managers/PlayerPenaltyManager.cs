@@ -353,39 +353,6 @@ public static class PlayerPenaltyManager
         state.Get(PenaltyType.Mute) is { Length: > 0 } || state.Get(PenaltyType.Silence) is { Length: > 0 };
 
     /// <summary>
-    /// TimeMode 0: the database says the row <paramref name="dbId"/> has used up its online minutes. Marks exactly
-    /// that entry; returns false when no entry mirrors the row (the caller then falls back to the end time).
-    /// </summary>
-    internal static bool MarkPassedByDbId(int slot, long dbId)
-    {
-        var found = false;
-        Update(slot, current =>
-        {
-            found = false;
-            var changed = current;
-            for (var t = 0; t < TypeCount; t++)
-            {
-                var list = changed.ByType[t];
-                if (list == null) continue;
-                Entry[]? copy = null;
-                for (var i = 0; i < list.Length; i++)
-                {
-                    if (list[i].DbId != dbId) continue;
-                    found = true;
-                    if (list[i].Passed) continue;
-                    copy ??= (Entry[])list.Clone();
-                    copy[i] = copy[i] with { Passed = true };
-                }
-
-                if (copy != null) changed = changed.With((PenaltyType)t, copy);
-            }
-
-            return changed;
-        });
-        return found;
-    }
-
-    /// <summary>
     /// Marks penalties with a specific end datetime as "passed" for a player (TimeMode 0).
     /// </summary>
     public static void RemovePenaltiesByDateTime(int slot, DateTime dateTime)
