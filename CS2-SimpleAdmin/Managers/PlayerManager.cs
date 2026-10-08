@@ -182,8 +182,9 @@ internal class PlayerManager
         var other = config.OtherSettings;
         var serverId = CS2_SimpleAdmin.ServerId;
 
-        // Save ip address before ban check
-        if (other.CheckMultiAccountsByIp && session.IpAddress != null)
+        // Save ip address before ban check. Always, not only for CheckMultiAccountsByIp: the site builds
+        // mirror transition stats (and partner/referral antifraud) from sa_players_ips.
+        if (session.IpAddress != null)
             await SavePlayerIpAddress(session.SteamId, session.Name, session.IpAddress, ct).ConfigureAwait(false);
 
         var now = Time.ActualDateTime();
