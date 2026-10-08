@@ -60,7 +60,15 @@ public class CS2_SimpleAdmin_RedisInform: BasePlugin, IPluginConfig<PluginConfig
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        SharedApi = _pluginCapability.Get();
+        try
+        {
+            SharedApi = _pluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // Capability 'simpleadmin:api' is not registered: core plugin missing or failed to load
+            SharedApi = null;
+        }
 
         if (SharedApi == null)
         {

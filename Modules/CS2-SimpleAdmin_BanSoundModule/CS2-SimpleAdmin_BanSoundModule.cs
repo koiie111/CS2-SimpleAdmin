@@ -18,7 +18,15 @@ public class CS2_SimpleAdmin_BanSoundModule: BasePlugin
 
     public override void OnAllPluginsLoaded(bool hotReload)
     {
-        _sharedApi = _pluginCapability.Get();
+        try
+        {
+            _sharedApi = _pluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // Capability 'simpleadmin:api' is not registered: core plugin missing or failed to load
+            _sharedApi = null;
+        }
         if (_sharedApi == null)
         {
             Logger.LogError("CS2-SimpleAdmin SharedApi not found");

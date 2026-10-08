@@ -101,7 +101,15 @@ public partial class CS2_SimpleAdmin_FunCommands : BasePlugin, IPluginConfig<Con
     public override void OnAllPluginsLoaded(bool hotReload)
     {
         // STEP 1: Get SimpleAdmin API using capability system
-        _sharedApi = _pluginCapability.Get();
+        try
+        {
+            _sharedApi = _pluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // Capability 'simpleadmin:api' is not registered: core plugin missing or failed to load
+            _sharedApi = null;
+        }
         if (_sharedApi == null)
         {
             Logger.LogError("CS2-SimpleAdmin API not found - make sure CS2-SimpleAdmin is loaded!");
