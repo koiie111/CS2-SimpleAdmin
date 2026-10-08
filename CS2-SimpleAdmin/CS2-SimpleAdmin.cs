@@ -96,7 +96,19 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         BotPlayers.Clear();
         Runtime.Sessions.Clear();
 
-        foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p is { Connected: PlayerConnectedState.Connected, IsHLTV: false }).ToArray())
+        CCSPlayerController[] connected;
+        try
+        {
+            connected = Utilities.GetPlayers().Where(p => p.IsValid && p is { Connected: PlayerConnectedState.Connected, IsHLTV: false }).ToArray();
+        }
+        catch (NativeException)
+        {
+            // Cold server start: CounterStrikeSharp loads plugins before the game globals exist
+            // ("Global Variables not initialized yet"), and nobody can be connected yet.
+            return;
+        }
+
+        foreach (var player in connected)
         {
             if (player.IsBot)
             {
