@@ -251,7 +251,8 @@ public class OtherSettings
     /// <summary>
     /// Command names (without trigger and without the css_ prefix, e.g. "rank", "top") that a gagged/silenced player may
     /// still run by typing a chat trigger ("!rank"). Only commands of <b>other plugins</b> that never relay player text to
-    /// other players belong here. Everything else typed with a trigger by a gagged player is dropped. This plugin's own
+    /// other players belong here. These commands can be called without arguments only; text after their name is dropped.
+    /// Everything else typed with a trigger by a gagged player is dropped. This plugin's own
     /// commands are decided by a fixed list of verified keys (css_admin, css_penalties, css_history, css_who, css_players,
     /// css_warns, css_adminhelp, css_disconnected, css_hide, css_hidecomms), under any alias; names of this plugin's own
     /// commands in this list are ignored (a dangerous own command cannot be allowed here).

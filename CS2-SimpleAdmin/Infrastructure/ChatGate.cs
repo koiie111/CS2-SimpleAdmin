@@ -126,7 +126,7 @@ internal static class OwnCommands
 /// contains "say", or this plugin's own commands that deliver the caller's text (<see cref="OwnCommandClass.PublishesText"/>,
 /// under any alias). The only thing a trigger line can still do is run a command that is verified safe (positive list
 /// <see cref="OwnCommands.SafeKeys"/>, never extended by configuration) or a command of another plugin that the operator
-/// listed in <c>GagAllowedChatCommands</c>; it runs exactly once, here, because the line itself is dropped before the engine's
+/// listed in <c>GagAllowedChatCommands</c> (without arguments); it runs exactly once, here, because the line itself is dropped before the engine's
 /// chat handler (which would both publish it and dispatch the command) ever sees it.
 /// </para>
 /// </summary>
@@ -173,6 +173,9 @@ internal static class ChatGate
         IEnumerable<string>? configuredForeign)
     {
         var silent = ChatTriggers.ToSilentCommand(text, triggers, bare => IsTriggerAllowed(bare, classify, configuredForeign));
+        var separator = silent?.IndexOf(' ') ?? -1;
+        if (separator >= 0 && classify(silent![..separator]) == OwnCommandClass.None)
+            return new ChatDecision(ChatVerdict.Block);
         return silent != null ? new ChatDecision(ChatVerdict.RunCommand, silent) : new ChatDecision(ChatVerdict.Block);
     }
 
@@ -194,11 +197,16 @@ internal static class ChatGate
     private static bool ConfiguredForeign(string bare, IEnumerable<string>? configured)
     {
         if (configured == null) return false;
+        if (configured is IReadOnlySet<string> set) return set.Contains(bare);
         foreach (var name in configured)
             if (ChatTriggers.StripPrefix(name).Equals(bare, StringComparison.OrdinalIgnoreCase))
                 return true;
         return false;
     }
+
+    internal static FrozenSet<string> PrepareForeign(IEnumerable<string> configured) =>
+        configured.Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(ChatTriggers.StripPrefix).ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>

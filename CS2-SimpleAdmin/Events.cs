@@ -419,7 +419,7 @@ public partial class CS2_SimpleAdmin
         var restriction = EvaluateRestriction(player, out var endDateTime);
         PluginMetrics.ChatPenaltyCheck.RecordSince(checkStart);
 
-        var decision = ChatGate.Decide(command, text, restriction, ChatTriggers.Current, Config.OtherSettings.GagAllowedChatCommands);
+        var decision = ChatGate.Decide(command, text, restriction, ChatTriggers.Current, AllowedForeignChatCommands);
         switch (decision.Verdict)
         {
             case ChatVerdict.Block:

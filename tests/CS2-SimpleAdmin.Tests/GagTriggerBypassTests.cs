@@ -237,6 +237,10 @@ public class GagTriggerBypassTests : IDisposable
     {
         Assert.Equal("css_rank", Gagged("say", "!RANK").Command);
         Assert.Equal("css_top", Gagged("say", "!top").Command);               // "css_top" in the list: prefix is ignored
+        Assert.Equal(ChatVerdict.Block, Gagged("say", "!rank hello_world").Verdict);
+        Assert.Equal(ChatVerdict.Block, Gagged("say_team", "/top message").Verdict);
+        Assert.Equal(ChatVerdict.Block, Gagged("say", "!rank_*write_message*").Verdict);
+        Assert.Equal(ChatVerdict.Block, Gagged("say", "!типа_*писать_сообщение_*вот_так").Verdict);
         Assert.Equal(ChatVerdict.Block, Gagged("say", "!stats").Verdict);     // not listed
         Assert.Equal(ChatVerdict.BlockAndNotify, Gagged("sm_psay", "x y").Verdict);
         Assert.Equal(ChatVerdict.Block, ChatGate.Decide("say", "!essay", ChatRestriction.Gagged, Triggers, ["essay"]).Verdict);
@@ -252,6 +256,17 @@ public class GagTriggerBypassTests : IDisposable
         Assert.Equal(ChatVerdict.Block, Gagged("say", "!!!admin", custom).Verdict);
         Assert.Equal(ChatVerdict.BlockAndNotify, Gagged("say", "!admin", custom).Verdict);
         Assert.Equal(ChatVerdict.BlockAndNotify, Gagged("say", "!admin", []).Verdict);
+        Assert.Equal("css_admin", Gagged("say", "!!admin", ["!", "!!"]).Command);
+        Assert.Equal("css_admin", Gagged("say", "!!admin", ["!!", "!"]).Command);
+        Assert.Equal(ChatVerdict.Block, Gagged("say", "!!!admin", ["!", "!!"]).Verdict);
+    }
+
+    [Fact]
+    public void CustomCommandCannotTakeAnOwnAlias()
+    {
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "css_admin", "css_penalties" };
+        Assert.False(RegisterCommands.MayRegisterCustomAlias("CSS_ADMIN", aliases));
+        Assert.True(RegisterCommands.MayRegisterCustomAlias("css_rank", aliases));
     }
 
     [Fact]
