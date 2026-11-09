@@ -93,9 +93,15 @@ public static class RegisterCommands
 
         // Classification by key, published once per registration: the command listener only looks names up
         OwnCommands.Replace(registered);
+        var ownAliases = registered.Select(pair => pair.Alias).ToHashSet(StringComparer.OrdinalIgnoreCase);
         
         foreach (var (name, definitions) in CustomCommandRegistry.Definitions)
         {
+            if (!MayRegisterCustomAlias(name, ownAliases))
+            {
+                CS2_SimpleAdmin._logger?.LogWarning("Skipping custom command {Name}: alias belongs to a SimpleAdmin command", name);
+                continue;
+            }
             foreach (var definition in definitions)
             {
                 CS2_SimpleAdmin._logger?.LogInformation($"Registering custom command: `{name}`");
@@ -103,6 +109,9 @@ public static class RegisterCommands
             }
         }
     }
+
+    internal static bool MayRegisterCustomAlias(string name, IReadOnlySet<string> ownAliases) =>
+        !ownAliases.Contains(name);
     
     /// <summary>
     /// Represents the JSON configuration structure for commands.

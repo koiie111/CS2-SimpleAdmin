@@ -1,5 +1,6 @@
 ﻿using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using System.Collections.Frozen;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Commands;
@@ -28,6 +29,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
     }
 
     private static CS2_SimpleAdminConfig? _configWithoutPlugin;
+    internal static FrozenSet<string> AllowedForeignChatCommands = Array.Empty<string>().ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Config of the running plugin. Code that has no plugin instance (unit tests, tools) gets a config set via
@@ -161,6 +163,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         Helper.ApplyLegacyOtherSettings(config);
 
         Config = config;
+        AllowedForeignChatCommands = ChatGate.PrepareForeign(config.OtherSettings.GagAllowedChatCommands);
 
         bool missing = false;
         var cssPath = Path.Combine(Server.GameDirectory, "csgo", "addons", "counterstrikesharp");

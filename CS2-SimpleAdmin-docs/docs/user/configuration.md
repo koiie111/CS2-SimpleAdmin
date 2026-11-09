@@ -145,7 +145,7 @@ where a penalty was issued. Admin permissions and groups keep their own per-serv
 
 Related `OtherSettings`:
 - `UnverifiedConnectionTimeoutSeconds` (default `45`, 10-600): a connection whose ban/mute state cannot be read in time is disconnected; nothing is written for it.
-- `GagAllowedChatCommands` (default `[]`): names of commands of **other plugins** a gagged/silenced player may still run with a chat trigger (`!rank`). This plugin's own commands are decided by a fixed list of verified keys (names listed here are ignored for them).
+- `GagAllowedChatCommands` (default `[]`): names of commands of **other plugins** a gagged/silenced player may still run with a chat trigger **without arguments** (`!rank` is allowed; `!rank text` is blocked). This plugin's own commands are decided by a fixed list of verified keys (names listed here are ignored for them).
 
 ### Discord Integration
 

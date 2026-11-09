@@ -42,37 +42,37 @@ internal static class ChatTriggers
     /// be dropped. A line qualifies only if all of these hold: exactly one trigger prefix; a command name of ASCII letters,
     /// digits and '_' (optional "css_" prefix); the name is on the allow-list (<paramref name="allowed"/>, bare name); the
     /// whole remainder is printable ASCII without ';', quotes and backslashes (no command chaining, no quoting tricks) and at
-    /// most 128 characters. "!привет", "!ez gg", "!x;quit", "!say hi", "!!x" and "! " all give null.
+    /// most 128 characters. The longest configured trigger wins when prefixes overlap.
     /// </summary>
     public static string? ToSilentCommand(string message, Func<string, bool> allowed) => ToSilentCommand(message, GetTriggers(), allowed);
 
     internal static string? ToSilentCommand(string message, string[] triggers, Func<string, bool> allowed)
     {
+        string? matched = null;
         foreach (var trigger in triggers)
-        {
-            if (trigger.Length == 0 || !message.StartsWith(trigger, StringComparison.Ordinal)) continue;
+            if (trigger.Length > 0 && (matched == null || trigger.Length > matched.Length) &&
+                message.StartsWith(trigger, StringComparison.Ordinal))
+                matched = trigger;
+        if (matched == null) return null;
 
-            var rest = message.AsSpan(trigger.Length).Trim();
-            if (rest.IsEmpty || rest.Length > 128) return null;
+        var rest = message.AsSpan(matched.Length).Trim();
+        if (rest.IsEmpty || rest.Length > 128) return null;
 
-            foreach (var c in rest)
-                if (c is < ' ' or > '~' or ';' or '"' or '\\') return null;
+        foreach (var c in rest)
+            if (c is < ' ' or > '~' or ';' or '"' or '\\') return null;
 
-            var nameEnd = rest.IndexOf(' ');
-            var name = nameEnd < 0 ? rest : rest[..nameEnd];
-            if (name.Length > 32) return null;
-            foreach (var c in name)
-                if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_'))
-                    return null;
+        var nameEnd = rest.IndexOf(' ');
+        var name = nameEnd < 0 ? rest : rest[..nameEnd];
+        if (name.Length > 32) return null;
+        foreach (var c in name)
+            if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_'))
+                return null;
 
-            var bare = StripPrefix(name.ToString()).ToLowerInvariant();
-            if (bare.Length == 0 || !allowed(bare)) return null;
+        var bare = StripPrefix(name.ToString()).ToLowerInvariant();
+        if (bare.Length == 0 || !allowed(bare)) return null;
 
-            var args = nameEnd < 0 ? "" : rest[nameEnd..].Trim().ToString();
-            return args.Length == 0 ? "css_" + bare : "css_" + bare + " " + args;
-        }
-
-        return null;
+        var args = nameEnd < 0 ? "" : rest[nameEnd..].Trim().ToString();
+        return args.Length == 0 ? "css_" + bare : "css_" + bare + " " + args;
     }
 
     /// <summary>"css_admin" → "admin"; "admin" → "admin".</summary>
