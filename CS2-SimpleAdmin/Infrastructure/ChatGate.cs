@@ -204,8 +204,8 @@ internal static class ChatGate
         return false;
     }
 
-    internal static FrozenSet<string> PrepareForeign(IEnumerable<string> configured) =>
-        configured.Where(name => !string.IsNullOrWhiteSpace(name))
+    internal static FrozenSet<string> PrepareForeign(IEnumerable<string>? configured) =>
+        (configured ?? Array.Empty<string>()).Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(ChatTriggers.StripPrefix).ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 }
 

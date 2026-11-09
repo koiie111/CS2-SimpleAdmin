@@ -270,6 +270,34 @@ public class GagTriggerBypassTests : IDisposable
     }
 
     [Fact]
+    public void NullForeignAllowlistIsEmpty()
+    {
+        var config = System.Text.Json.JsonSerializer.Deserialize<OtherSettings>(
+            "{\"GagAllowedChatCommands\":null}")!;
+        var prepared = ChatGate.PrepareForeign(config.GagAllowedChatCommands);
+        Assert.Empty(prepared);
+        Assert.Equal(ChatVerdict.Block,
+            ChatGate.Decide("say", "!rank", ChatRestriction.Gagged, Triggers, prepared).Verdict);
+    }
+
+    [Theory]
+    [InlineData("say", false)]
+    [InlineData("say_team", false)]
+    [InlineData("say", true)]
+    [InlineData("say_team", true)]
+    public void PreparedForeignAllowlistPreservesNormalizationAndArgumentRestrictions(string command, bool unverified)
+    {
+        var restriction = unverified ? ChatRestriction.Unverified : ChatRestriction.Gagged;
+        var prepared = ChatGate.PrepareForeign(["CSS_RANK", "rank", "", " ", null!]);
+        Assert.Single(prepared);
+        Assert.Equal("css_rank", ChatGate.Decide(command, "!RANK", restriction, Triggers, prepared).Command);
+        Assert.Equal(ChatVerdict.Block,
+            ChatGate.Decide(command, "!rank hello", restriction, Triggers, prepared).Verdict);
+        Assert.Equal(ChatVerdict.Block,
+            ChatGate.Decide(command, "!stats", restriction, Triggers, prepared).Verdict);
+    }
+
+    [Fact]
     public void WithoutAChatRestrictionEverythingKeepsItsNormalPathAndAMuteAloneIsNotOne()
     {
         Assert.Equal(ChatVerdict.Pass, Free("say", "hello").Verdict);

@@ -115,7 +115,8 @@
   `css_adminhelp`, `css_who`, `css_disconnected`, `css_warns`, `css_history`, `css_players`, `css_hide`, `css_hidecomms`);
   *PublishesText* — `css_say`, `css_psay`, `css_csay`, `css_hsay`, `css_cssay`, `css_asay`, `css_vote`; *Other* — остальные
   (администрирование с аргументами, причинами, именами…). Через триггер игрока с GAG/SILENCE выполняются только *Safe*
-  (под любым алиасом) и команды **других плагинов** из `GagAllowedChatCommands`; имя собственной команды в этом списке
+  (под любым алиасом) и команды **других плагинов** из `GagAllowedChatCommands` **без аргументов** (`!rank` разрешён,
+  `!rank текст` блокируется); имя собственной команды в этом списке
   игнорируется. Команды других плагинов с `say` в имени и неизвестные блокируются по подстроке, как раньше.
 * **Общий guard в самих callback'ах** (`ChatGuard.MayPublish`) стоит первой строкой во всех callback'ах, доставляющих текст
   вызвавшего другим игрокам (`basechat.cs`: 6 команд, `css_vote`), поэтому защита не зависит от пути `say` и от имени
@@ -166,7 +167,7 @@ GAG/MUTE/SILENCE (`LocalPenalty.Issue`): сначала задание пред�
 | Параметр | По умолчанию | Смысл |
 |---|---|---|
 | `OtherSettings.UnverifiedConnectionTimeoutSeconds` | 45 | Срок непроверенного подключения (10–600 с). |
-| `OtherSettings.GagAllowedChatCommands` | `[]` | Команды **других плагинов**, доступные игроку с GAG/SILENCE через триггер (свои команды плагина решаются списком проверенных ключей). |
+| `OtherSettings.GagAllowedChatCommands` | `[]` | Команды **других плагинов**, доступные игроку с GAG/SILENCE через триггер только без аргументов (свои команды плагина решаются списком проверенных ключей). |
 | `OtherSettings.BanType`, `IgnoredIps`, `CheckMultiAccountsByIp` | — | Не влияют на баны (IP не банит). |
 | `MultiServerMode` | `true` | Устарел и игнорируется для наказаний. |
 
