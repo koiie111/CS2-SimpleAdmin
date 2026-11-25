@@ -447,7 +447,7 @@ internal class CacheManager : IDisposable
         return PlayerManager.ToDateTime(value) ?? throw new InvalidOperationException($"Unexpected CURRENT_TIMESTAMP value '{value}'");
     }
 
-    private static string UnknownName() => CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+    private static string UnknownName() => CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
 
     // ------------------------------------------------------------------ immediate updates
 

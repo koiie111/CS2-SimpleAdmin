@@ -111,7 +111,12 @@ internal static class PenaltyRemoval
         // Game thread: this is the removal's place in the accept order (see the class remarks)
         var acceptedAt = connection != null ? PlayerPenaltyManager.NextRevision() : 0;
         var orderKey = connection?.SteamId ?? SteamIdOf(sqlPattern);
-        var (done, noun) = type switch { 1 => ("Unmuted", "mute"), 2 => ("Unsilenced", "silence"), _ => ("Ungagged", "gag") };
+        var (removed, missing) = type switch
+        {
+            1 => ("Мут снят.", "Активного мута нет."),
+            2 => ("Сайленс снят.", "Активного сайленса нет."),
+            _ => ("Гаг снят.", "Активного гага нет."),
+        };
         label ??= sqlPattern;
 
         return CS2_SimpleAdmin.TryQueuePenaltyWork(caller, null, "mute-write", async _ =>
@@ -119,7 +124,7 @@ internal static class PenaltyRemoval
             var outcome = await UnmuteSql(sqlPattern, callerSteamId, reason, type).ConfigureAwait(false);
             if (outcome == UnmuteOutcome.Failed)
             {
-                await CS2_SimpleAdmin.ReportWriteFailureAsync("Unmute").ConfigureAwait(false);
+                await CS2_SimpleAdmin.ReportWriteFailureAsync("снятие ограничения чата").ConfigureAwait(false);
                 return;
             }
 
@@ -128,9 +133,7 @@ internal static class PenaltyRemoval
             {
                 if (connection is { } snapshot)
                     ApplyToTarget(snapshot, type, decrementCounter, acceptedAt);
-                caller.Notify(outcome == UnmuteOutcome.Removed
-                    ? $"{done} {label}."
-                    : $"{label}: no active {noun} found (nothing to remove).");
+                caller.Notify($"{label}: {(outcome == UnmuteOutcome.Removed ? removed : missing)}");
             }).ConfigureAwait(false);
         }, orderKey: orderKey);
     }

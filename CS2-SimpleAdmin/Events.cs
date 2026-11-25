@@ -430,7 +430,10 @@ public partial class CS2_SimpleAdmin
                     player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
                 return HookResult.Stop;
             case ChatVerdict.BlockUnverified:
-                player.PrintToChat("[CS2-SimpleAdmin] Chat is unavailable until your penalties are verified.");
+                var pendingMessage = _localizer?["sa_player_penalty_check_pending"];
+                player.PrintToChat(pendingMessage is { ResourceNotFound: false }
+                    ? pendingMessage.Value
+                    : "Чат станет доступен после проверки ваших наказаний.");
                 return HookResult.Stop;
             case ChatVerdict.RunCommand:
                 // The line is dropped before the engine's chat handler (which would publish it and dispatch the command); the

@@ -1,40 +1,38 @@
-{GREEN}[ CS2-SimpleAdmin HELP ]{DEFAULT}
-- css_who <#userid or name>  - Display informations about player
-- css_history <#userid or name or steamid64> [bans|gags|mutes|silences|warns] - Print player's penalty history to console
-- css_players - Display player list
-- css_ban <#userid or name> [time in minutes/0 perm] [reason] - Ban player
-- css_addban <steamid> [time in minutes/0 perm] [reason] - Ban player via steamid64
-- css_banip <ip> [time in minutes/0 perm] [reason] - Ban player via IP address
-- css_unban <steamid or name or ip> - Unban player
-- css_kick <#userid or name> [reason] - Kick player
-- css_gag <#userid or name> [time in minutes/0 perm] [reason] - Gag player
-- css_addgag <steamid> [time in minutes/0 perm] [reason] - Gag player via steamid64
-- css_unmute <steamid or name> - Ungag player
-- css_mute <#userid or name> [time in minutes/0 perm] [reason] - Mute player
-- css_addmute <steamid> [time in minutes/0 perm] [reason] - Mute player via steamid64
-- css_give <#userid or name> <weapon> - Give player a weapon
-- css_strip <#userid or name> <weapon> - Takes all of the player weapons
-- css_hp <#userid or name> [health] - Set player health
-- css_speed <#userid or name> [speed] - Set player speed
-- css_gravity <#userid or name> [gravity] - Set player gravity
-- css_money <#userid or name> [money] - Set player money
-- css_god <#userid or name> - Toggle player godmode
-- css_slay <#userid or name> - Kill player
-- css_slap <#userid or name> [damage] - Slap player
-- css_vote <'Question?'> ['Answer1'] ['Answer2'] ... - Create vote
-- css_map <mapname> - Change map
-- css_wsmap <name or id> - Change workshop map
-- css_asay <message> - Say message to all admins
-- css_say <message> - Say message as admin in chat
-- css_psay <#userid or name> <message> - Sends private message to player
-- css_csay <message> - Say message as admin in center
-- css_hsay <message> - Say message as admin in hud
-- css_noclip <#userid or name> - Toggle noclip for player
-- css_freeze <#userid or name> [duration] - Freeze player
-- css_unfreeze <#userid or name> - Unfreeze player
-- css_respawn <#userid or name> - Respawn player
-- css_cvar <cvar> <value> - Change cvar value
-- css_rcon <command> - Run command as server
-
-{Green}This is a sample admin_help.txt file
-{LightRed}Write all useful information for admins here
+{GREEN}[ CS2-SimpleAdmin · Команды ]{DEFAULT}
+- css_who <#userid или ник> - Показать сведения об игроке
+- css_history <#userid, ник или SteamID64> [bans|gags|mutes|silences|warns] [страница] - Вывести историю наказаний в консоль
+- css_players - Показать список игроков
+- css_ban <#userid или ник> [минуты, 0 — навсегда] [причина] - Забанить игрока
+- css_addban <SteamID64> [минуты, 0 — навсегда] [причина] - Забанить игрока по SteamID64
+- css_banip <IP> [минуты, 0 — навсегда] [причина] - Найти игрока на сервере по IP и забанить по SteamID
+- css_unban <SteamID или ник> - Снять бан
+- css_kick <#userid или ник> [причина] - Отключить игрока от сервера
+- css_gag <#userid или ник> [минуты, 0 — навсегда] [причина] - Запретить писать в чат
+- css_addgag <SteamID64> [минуты, 0 — навсегда] [причина] - Выдать гаг по SteamID64
+- css_ungag <SteamID64 или ник> [причина] - Снять гаг
+- css_mute <#userid или ник> [минуты, 0 — навсегда] [причина] - Отключить голосовой чат игроку
+- css_addmute <SteamID64> [минуты, 0 — навсегда] [причина] - Выдать мут по SteamID64
+- css_unmute <SteamID64 или ник> [причина] - Снять мут
+- css_give <#userid или ник> <оружие> - Выдать оружие
+- css_strip <#userid или ник> - Забрать всё оружие
+- css_hp <#userid или ник> [здоровье] - Задать здоровье игрока
+- css_speed <#userid или ник> [скорость] - Задать скорость игрока
+- css_gravity <#userid или ник> [гравитация] - Задать гравитацию игрока
+- css_money <#userid или ник> [сумма] - Задать сумму денег у игрока
+- css_god <#userid или ник> - Включить или отключить бессмертие
+- css_slay <#userid или ник> - Убить игрока
+- css_slap <#userid или ник> [урон] - Шлёпнуть игрока
+- css_vote <"Вопрос?"> ["Ответ 1"] ["Ответ 2"] ... - Начать голосование
+- css_map <карта> - Сменить карту
+- css_wsmap <название или ID> - Сменить карту на карту из Мастерской
+- css_asay <сообщение> - Отправить сообщение администраторам
+- css_say <сообщение> - Написать в общий чат от имени администратора
+- css_psay <#userid или ник> <сообщение> - Отправить личное сообщение игроку
+- css_csay <сообщение> - Показать сообщение в центре экрана
+- css_hsay <сообщение> - Показать сообщение в HUD
+- css_noclip <#userid или ник> - Включить или отключить полёт сквозь стены
+- css_freeze <#userid или ник> [время] - Заморозить игрока
+- css_unfreeze <#userid или ник> - Разморозить игрока
+- css_respawn <#userid или ник> - Возродить игрока
+- css_cvar <переменная> <значение> - Изменить значение переменной сервера
+- css_rcon <команда> - Выполнить команду от имени сервера

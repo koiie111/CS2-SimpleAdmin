@@ -49,7 +49,7 @@ public partial class CS2_SimpleAdmin
             var playersToTarget = targets.Players.Where(player => player is { IsValid: true, IsHLTV: false }).ToList();
             if (playersToTarget.Count != 1)
             {
-                command.ReplyToCommand("Only one target is allowed.");
+                command.ReplyToCommand("Можно выбрать только одного игрока.");
                 return;
             }
 
@@ -63,7 +63,7 @@ public partial class CS2_SimpleAdmin
         // PlayersInfo is filled by the async connect load; a target who joined a moment ago may not be in it yet
         if (!PlayersInfo.ContainsKey(steamId))
         {
-            command.ReplyToCommand("Player data is still loading, try again in a moment.");
+            command.ReplyToCommand("Данные игрока ещё загружаются. Попробуйте чуть позже.");
             return;
         }
 
@@ -170,7 +170,7 @@ public partial class CS2_SimpleAdmin
                 _logger?.LogError($"Error processing player information: {ex}");
             }
         }))
-            command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+            command.ReplyToCommand("[CS2-SimpleAdmin] Сервер занят. Попробуйте чуть позже.");
     }
 
     /// <summary>
@@ -248,14 +248,14 @@ public partial class CS2_SimpleAdmin
         RefreshAdminHelpInBackground();
         if (!AdminHelp.IsLoaded)
         {
-            command.ReplyToCommand("[CS2-SimpleAdmin] Admin help is loading, try again in a moment.");
+            command.ReplyToCommand("[CS2-SimpleAdmin] Список команд ещё загружается. Попробуйте чуть позже.");
             return;
         }
 
         foreach (var line in AdminHelp.Lines)
             command.ReplyToCommand(line);
         if (AdminHelp.OmittedLines > 0)
-            command.ReplyToCommand($"... {AdminHelp.OmittedLines} more line(s) in admin_help.txt");
+            command.ReplyToCommand($"Остальные команды ({AdminHelp.OmittedLines}) доступны в admin_help.txt.");
     }
 
     internal static readonly AdminHelpCache AdminHelp = new();
@@ -284,7 +284,7 @@ public partial class CS2_SimpleAdmin
 
         if (!Helper.ValidateSteamId(command.GetArg(1), out var steamId) || steamId == null)
         {
-            command.ReplyToCommand($"Invalid SteamID64.");
+            command.ReplyToCommand($"Неверный SteamID64.");
             return;
         }
 
@@ -292,12 +292,12 @@ public partial class CS2_SimpleAdmin
 
         if (command.GetArg(2).Length <= 0)
         {
-            command.ReplyToCommand($"Invalid player name.");
+            command.ReplyToCommand($"Неверный ник игрока.");
             return;
         }
         if (!command.GetArg(3).Contains('@') && !command.GetArg(3).Contains('#'))
         {
-            command.ReplyToCommand($"Invalid flag or group.");
+            command.ReplyToCommand($"Неверный флаг или группа.");
             return;
         }
 
@@ -354,7 +354,7 @@ public partial class CS2_SimpleAdmin
 
         if (!Helper.ValidateSteamId(command.GetArg(1), out var steamId) || steamId == null)
         {
-            command.ReplyToCommand($"Invalid SteamID64.");
+            command.ReplyToCommand($"Неверный SteamID64.");
             return;
         }
 
@@ -413,13 +413,13 @@ public partial class CS2_SimpleAdmin
 
         if (!command.GetArg(1).StartsWith("#"))
         {
-            command.ReplyToCommand($"Group name must start with #.");
+            command.ReplyToCommand($"Название группы должно начинаться с #.");
             return;
         }
 
         if (!command.GetArg(2).StartsWith($"@") && !command.GetArg(2).StartsWith($"#"))
         {
-            command.ReplyToCommand($"Invalid flag or group.");
+            command.ReplyToCommand($"Неверный флаг или группа.");
             return;
         }
 
@@ -472,7 +472,7 @@ public partial class CS2_SimpleAdmin
 
         if (!command.GetArg(1).StartsWith($"#"))
         {
-            command.ReplyToCommand($"Group name must start with #.");
+            command.ReplyToCommand($"Название группы должно начинаться с #.");
             return;
         }
 
@@ -520,7 +520,7 @@ public partial class CS2_SimpleAdmin
         // Admins/groups are not tied to this server row being resolved: connected + migrated is enough
         if (!EnsureDatabaseReady(command, OperationScope.Global)) return;
         // Reloads are coalesced: a reload already running is followed by exactly one more
-        command.ReplyToCommand("Reloading sql admins and groups...");
+        command.ReplyToCommand("Обновляем список администраторов и групп из базы…");
         _ = ReportAdminReloadAsync(CallerRef.Capture(caller));
     }
 
@@ -564,7 +564,7 @@ public partial class CS2_SimpleAdmin
                 try
                 {
                     await cache.ForceReInitializeCacheAsync(config, ct);
-                    message = $"Reloaded bans ({cache.Snapshot.ActiveCount} active)";
+                    message = $"Список банов обновлён. Активных: {cache.Snapshot.ActiveCount}.";
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -579,11 +579,11 @@ public partial class CS2_SimpleAdmin
                 });
             }))
         {
-            command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+            command.ReplyToCommand("[CS2-SimpleAdmin] Сервер занят. Попробуйте чуть позже.");
             return;
         }
 
-        command.ReplyToCommand("Reloading bans...");
+        command.ReplyToCommand("Обновляем список банов…");
     }
 
     /// <summary>
@@ -613,7 +613,7 @@ public partial class CS2_SimpleAdmin
         {
             SilentPlayers.Remove(caller.Slot);
             PublishSilentSnapshot();
-            caller.PrintToChat($"You aren't hidden now!");
+            caller.PrintToChat($"Вы снова видны игрокам.");
             if (caller.TeamNum <= 1)
                 caller.ChangeTeam(CsTeam.Spectator);
             SimpleAdminApi?.OnAdminToggleSilentEvent(caller.Slot, false);
@@ -626,7 +626,7 @@ public partial class CS2_SimpleAdmin
             if (caller.PlayerPawn?.Value?.LifeState == (int)LifeState_t.LIFE_ALIVE)
                 caller.PlayerPawn.Value?.CommitSuicide(true, false);
 
-            caller.PrintToChat($"You are hidden now!");
+            caller.PrintToChat($"Вы скрыты от игроков.");
             if (caller.TeamNum > 1)
                 AddTimer(0.15f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.Spectator); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
             AddTimer(0.26f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.None); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
@@ -650,12 +650,12 @@ public partial class CS2_SimpleAdmin
         if (!AdminDisabledJoinComms.Add(caller.SteamID))
         {
             AdminDisabledJoinComms.Remove(caller.SteamID);
-            command.ReplyToCommand("From now on, you'll see penalty notifications");
+            command.ReplyToCommand("Уведомления о наказаниях включены.");
         }
         else
         {
             AdminDisabledJoinComms.Add(caller.SteamID);
-            command.ReplyToCommand($"You don't see penalty notifications now");
+            command.ReplyToCommand($"Уведомления о наказаниях отключены.");
         }
     }
 
@@ -888,7 +888,7 @@ public partial class CS2_SimpleAdmin
 
             if (!EnsureDatabaseReady(command)) return;
             if (!QueueWarnsMenu(caller, callerSteamId, player, targetInfo, menuTitle, 1))
-                command.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+                command.ReplyToCommand("[CS2-SimpleAdmin] Сервер занят. Попробуйте чуть позже.");
         });
     }
 
@@ -971,7 +971,7 @@ public partial class CS2_SimpleAdmin
 
         if (filter is not (null or "bans" or "gags" or "mutes" or "silences" or "warns"))
         {
-            command.ReplyToCommand("Usage: css_history <#userid or name or steamid64> [bans|gags|mutes|silences|warns] [page]");
+            command.ReplyToCommand("Использование: css_history <#userid, ник или SteamID64> [bans|gags|mutes|silences|warns] [page]");
             return;
         }
 
@@ -993,7 +993,7 @@ public partial class CS2_SimpleAdmin
             var players = targets.Players.Where(p => p is { IsValid: true, IsBot: false, IsHLTV: false }).ToList();
             if (players.Count != 1)
             {
-                command.ReplyToCommand("Only one target is allowed.");
+                command.ReplyToCommand("Можно выбрать только одного игрока.");
                 return;
             }
 
@@ -1052,7 +1052,7 @@ public partial class CS2_SimpleAdmin
         });
 
         if (!accepted)
-            command?.ReplyToCommand("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+            command?.ReplyToCommand("[CS2-SimpleAdmin] Сервер занят. Попробуйте чуть позже.");
     }
 
     /// <summary>Formats one history page as console lines (worker thread; pure).</summary>
@@ -1186,7 +1186,7 @@ public partial class CS2_SimpleAdmin
     [CommandHelper(minArgs: 1, usage: "<#userid or name> [reason]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnKickCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
 
         var targets = GetTarget(command);
 
@@ -1201,9 +1201,9 @@ public partial class CS2_SimpleAdmin
 
         var reason = command.ArgCount >= 2 
             ? string.Join(" ", Enumerable.Range(2, command.ArgCount - 2).Select(command.GetArg)).Trim() 
-            : _localizer?["sa_unknown"] ?? "Unknown";
+            : _localizer?["sa_unknown"] ?? "Неизвестно";
 
-        reason = string.IsNullOrWhiteSpace(reason) ? _localizer?["sa_unknown"] ?? "Unknown" : reason;
+        reason = string.IsNullOrWhiteSpace(reason) ? _localizer?["sa_unknown"] ?? "Неизвестно" : reason;
 
         playersToTarget.ForEach(player =>
         {
@@ -1235,8 +1235,8 @@ public partial class CS2_SimpleAdmin
         if (!player.UserId.HasValue) return;
         
         // Set default caller name if not provided
-        callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
-        reason ??= _localizer?["sa_unknown"] ?? "Unknown";
+        callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
+        reason ??= _localizer?["sa_unknown"] ?? "Неизвестно";
         
         var playerInfo = GetPlayerInfo(player);
         var adminInfo = caller != null && caller.UserId.HasValue ? GetPlayerInfo(caller) : null;
@@ -1290,7 +1290,7 @@ public partial class CS2_SimpleAdmin
     /// <param name="command">Optional command object for logging and replies.</param>
     public void ChangeMap(CCSPlayerController? caller, string map, CommandInfo? command = null)
     {
-        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
         map = map.ToLower();
 
         if (map.StartsWith("ws:"))
@@ -1359,7 +1359,7 @@ public partial class CS2_SimpleAdmin
     public void ChangeWorkshopMap(CCSPlayerController? caller, string map, CommandInfo? command = null)
     {
         map = map.ToLower();
-        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
 
         // Determine the workshop command
         var issuedCommand = long.TryParse(map, out var mapId)
@@ -1395,25 +1395,25 @@ public partial class CS2_SimpleAdmin
     public void OnCvarCommand(CCSPlayerController? caller, CommandInfo command)
     {
         var cvar = ConVar.Find(command.GetArg(1));
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
 
         if (cvar == null)
         {
-            command.ReplyToCommand($"Cvar \"{command.GetArg(1)}\" not found.");
+            command.ReplyToCommand($"Переменная «{command.GetArg(1)}» не найдена.");
             return;
         }
 
         if (cvar.Name.Equals("sv_cheats") && !AdminManager.PlayerHasPermissions(new SteamID(caller!.SteamID), "@css/cheats"))
         {
-            command.ReplyToCommand($"You don't have permissions to change \"{command.GetArg(1)}\".");
+            command.ReplyToCommand($"У вас нет прав на изменение «{command.GetArg(1)}».");
             return;
         }
 
         Helper.LogCommand(caller, command);
         var value = command.GetArg(2);
         Server.ExecuteCommand($"{cvar.Name} {value}");
-        command.ReplyToCommand($"{callerName} changed cvar {cvar.Name} to {value}.");
-        Logger.LogInformation($"{callerName} changed cvar {cvar.Name} to {value}.");
+        command.ReplyToCommand($"{callerName} изменил значение {cvar.Name} на {value}.");
+        Logger.LogInformation($"{callerName} изменил значение {cvar.Name} на {value}.");
     }
 
     /// <summary>
@@ -1425,10 +1425,10 @@ public partial class CS2_SimpleAdmin
     [RequiresPermissions("@css/rcon")]
     public void OnRconCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
         Helper.LogCommand(caller, command);
         Server.ExecuteCommand(command.ArgString);
-        command.ReplyToCommand($"{callerName} executed command {command.ArgString}.");
+        command.ReplyToCommand($"{callerName} выполнил команду {command.ArgString}.");
         Logger.LogInformation($"{callerName} executed command ({command.ArgString}).");
     }
 
@@ -1528,7 +1528,7 @@ public partial class CS2_SimpleAdmin
         Helper.LogCommand(admin, "css_restartgame");
 
         // TODO: Localize
-        var name = admin == null ? _localizer?["sa_console"] ?? "Console" : admin.PlayerName;
+        var name = admin == null ? _localizer?["sa_console"] ?? "Консоль" : admin.PlayerName;
         Server.PrintToChatAll($"[SA] {name}: Restarting game...");
         Server.ExecuteCommand("mp_restartgame 2");
     }

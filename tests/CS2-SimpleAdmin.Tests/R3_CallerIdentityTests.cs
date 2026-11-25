@@ -90,7 +90,7 @@ public class R3_CallerIdentityTests : IDisposable
         var worker = await RunDelayedFailure(Admin, () => _slotOccupant = null); // caller left
 
         Assert.Empty(_chat);
-        Assert.Contains(_console, m => m.Contains("could NOT be saved"));
+        Assert.Contains(_console, m => m.Contains("Не удалось сохранить действие"));
         Assert.All(_nativeCalls, c => Assert.NotEqual(worker, c.Thread));
     }
 

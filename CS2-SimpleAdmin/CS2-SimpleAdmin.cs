@@ -301,7 +301,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
 
         if (!matches.Any())
         {
-            command.ReplyToCommand($"Target {command.GetArg(argument)} not found.");
+            command.ReplyToCommand($"Игрок {command.GetArg(argument)} не найден.");
             return null;
         }
 
@@ -311,7 +311,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         if (matches.Count() == 1)
             return matches;
 
-        command.ReplyToCommand($"Multiple targets found for \"{command.GetArg(argument)}\".");
+        command.ReplyToCommand($"Найдено несколько игроков по запросу «{command.GetArg(argument)}».");
         return null;
     }
 

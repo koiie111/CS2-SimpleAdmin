@@ -827,7 +827,7 @@ public class R10_RecheckN1N6Tests
         Assert.True(f.Gagged);
         Assert.Equal(0, f.SqlCalls);
         Assert.Equal(0, f.VoiceResets);
-        Assert.Contains(f.Console, m => m.Contains("NOT saved")); // the admin was told
+        Assert.Contains(f.Console, m => m.Contains("Действие не сохранено")); // the admin was told
     }
 
     [Fact]
@@ -858,7 +858,7 @@ public class R10_RecheckN1N6Tests
             Assert.True(f.Muted);
             Assert.True(f.Gagged);
             Assert.Equal(0, f.VoiceResets);
-            Assert.Contains(f.Console, m => m.Contains("NOT saved"));
+            Assert.Contains(f.Console, m => m.Contains("Действие не сохранено"));
         }
         finally { gate.SetResult(); }
     }
@@ -918,7 +918,7 @@ public class R10_RecheckN1N6Tests
         Assert.True(f.Muted, "the SQL failed: the player must stay muted");
         Assert.True(f.Gagged);
         Assert.Equal(0, f.VoiceResets);
-        Assert.Contains(f.Console, m => m.Contains("could NOT be saved"));
+        Assert.Contains(f.Console, m => m.Contains("Не удалось сохранить действие"));
     }
 
     [Fact]
@@ -990,7 +990,7 @@ public class R10_RecheckN1N6Tests
         using var f = new RemovalFixture();
         PenaltyRemoval.UnmuteSql = static (p, a, r, t) => CS2_SimpleAdmin.Instance.MuteManager.UnmutePlayer(p, a, r, t); // the real thing
         Assert.True(f.Queue());
-        await world.PumpUntil(() => f.Console.Any(m => m.Contains("could NOT be saved")));
+        await world.PumpUntil(() => f.Console.Any(m => m.Contains("Не удалось сохранить действие")));
         Assert.True(f.Muted);
         Assert.Equal(0, f.VoiceResets);
     }

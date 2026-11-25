@@ -16,12 +16,12 @@ public static class ManageServerMenu
         {
             admin.PrintToChat(localizer?["sa_prefix"] ??
                               "[SimpleAdmin] " +
-                              (localizer?["sa_no_permission"] ?? "You do not have permissions to use this command")
+                              (localizer?["sa_no_permission"] ?? "У вас нет прав на использование этой команды.")
             );
             return;
         }
 
-        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_server_manage"] ?? "Server Manage");
+        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_server_manage"] ?? "Управление сервером");
         List<ChatMenuOptionData> options = [];
 
         // permissions
@@ -34,15 +34,15 @@ public static class ManageServerMenu
 
         if (hasPlugins)
         {
-            options.Add(new ChatMenuOptionData(localizer?["sa_menu_pluginsmanager_title"] ?? "Manage Plugins", () => admin.ExecuteClientCommandFromServer("css_pluginsmanager")));
+            options.Add(new ChatMenuOptionData(localizer?["sa_menu_pluginsmanager_title"] ?? "Управление плагинами", () => admin.ExecuteClientCommandFromServer("css_pluginsmanager")));
         }
 
         if (hasMap)
         {
-            options.Add(new ChatMenuOptionData(localizer?["sa_changemap"] ?? "Change Map", () => ChangeMapMenu(admin)));
+            options.Add(new ChatMenuOptionData(localizer?["sa_changemap"] ?? "Сменить карту", () => ChangeMapMenu(admin)));
         }
 
-        options.Add(new ChatMenuOptionData(localizer?["sa_restart_game"] ?? "Restart Game", () => CS2_SimpleAdmin.RestartGame(admin)));
+        options.Add(new ChatMenuOptionData(localizer?["sa_restart_game"] ?? "Перезапустить игру", () => CS2_SimpleAdmin.RestartGame(admin)));
 
         foreach (var menuOptionData in options)
         {
@@ -55,7 +55,7 @@ public static class ManageServerMenu
 
     private static void ChangeMapMenu(CCSPlayerController admin)
     {
-        var menu = AdminMenu.CreateMenu(CS2_SimpleAdmin._localizer?["sa_changemap"] ?? "Change Map");
+        var menu = AdminMenu.CreateMenu(CS2_SimpleAdmin._localizer?["sa_changemap"] ?? "Сменить карту");
         List<ChatMenuOptionData> options = [];
 
         var maps = CS2_SimpleAdmin.Instance.Config.DefaultMaps;

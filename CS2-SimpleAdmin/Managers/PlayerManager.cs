@@ -62,7 +62,7 @@ internal class PlayerManager
         var steamId = player.SteamID;
         var playerName = !string.IsNullOrEmpty(player.PlayerName)
             ? player.PlayerName
-            : CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+            : CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
         var ipAddress = player.IpAddress?.Split(":")[0];
 
         if (CS2_SimpleAdmin.RenamedPlayers.TryGetValue(steamId, out var renamedTo))
@@ -461,7 +461,7 @@ internal class PlayerManager
             }
 
             if (info.AccountsAssociated.Count > MaxAssociatedAccountsShown)
-                admin.PrintToChat($" (+{info.AccountsAssociated.Count - MaxAssociatedAccountsShown} more accounts, see css_history / site)");
+                admin.PrintToChat($" (+{info.AccountsAssociated.Count - MaxAssociatedAccountsShown} связанных аккаунтов, подробнее в css_history или на сайте)");
         }
     }
 

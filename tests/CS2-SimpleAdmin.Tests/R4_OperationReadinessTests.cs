@@ -79,7 +79,7 @@ public class R4_OperationReadinessTests
         try
         {
             Assert.False(CS2_SimpleAdmin.TryQueuePenaltyWork(CallerRef.Console, null, "mute-write", _ => Task.CompletedTask));
-            Assert.Contains(messages, m => m.Contains("NOT saved"));
+            Assert.Contains(messages, m => m.Contains("Действие не сохранено"));
         }
         finally { CallerRef.PrintToConsole = oldPrint; }
 

@@ -21,7 +21,7 @@ public partial class CS2_SimpleAdmin
     [CommandHelper(minArgs: 1, usage: "<#userid or name>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnSlayCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
         var targets = GetTarget(command);
         if (targets == null) return;
 
@@ -48,7 +48,7 @@ public partial class CS2_SimpleAdmin
         if (!caller.CanTarget(player)) return;
 
         // Set default caller name if not provided
-        callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
+        callerName ??= caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
 
         // Make the player commit suicide
         player.CommitSuicide(false, true);
@@ -117,7 +117,7 @@ public partial class CS2_SimpleAdmin
         if (!caller.CanTarget(player)) return;
 
         // Set default caller name if not provided
-        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
         
         // Apply slap damage to the player
         player.Pawn.Value?.Slap(damage);
@@ -150,7 +150,7 @@ public partial class CS2_SimpleAdmin
     [CommandHelper(minArgs: 2, usage: "<#userid or name> [<ct/tt/spec>] [-k]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnTeamCommand(CCSPlayerController? caller, CommandInfo command)
     {
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
         var teamName = command.GetArg(2).ToLower();
         string _teamName;
         var teamNum = CsTeam.Spectator;
@@ -214,7 +214,7 @@ public partial class CS2_SimpleAdmin
         if (!caller.CanTarget(player)) return;
 
         // Set default caller name if not provided
-        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : _localizer?["sa_console"] ?? "Консоль";
 
         // Change team based on the provided teamName and conditions
         if (!teamName.Equals("swap", StringComparison.OrdinalIgnoreCase))
@@ -261,7 +261,7 @@ public partial class CS2_SimpleAdmin
     public void OnRenameCommand(CCSPlayerController? caller, CommandInfo command)
     {
         // Set default caller name if not provided
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
 
         // Get the new name from the command arguments
         var newName = command.GetArg(2);
@@ -310,7 +310,7 @@ public partial class CS2_SimpleAdmin
     public void OnPrenameCommand(CCSPlayerController? caller, CommandInfo command)
     {
         // Set default caller name if not provided
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
 
         // Get the new name from the command arguments
         var newName = command.GetArg(2);

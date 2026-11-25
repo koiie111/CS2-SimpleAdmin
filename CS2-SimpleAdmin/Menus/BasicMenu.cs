@@ -78,7 +78,7 @@ public abstract class BasicMenu
             string localizedTitle;
             using (new WithTemporaryCulture(admin.GetLanguage()))
             {
-                localizedTitle = $"{localizer?["sa_slap"] ?? "Slap"}: {target.PlayerName}";
+                localizedTitle = $"{localizer?["sa_slap"] ?? "Шлёпнуть"}: {target.PlayerName}";
             }
 
             var slapDamageMenu = new MenuBuilder(localizedTitle);
@@ -199,7 +199,7 @@ public abstract class BasicMenu
                 });
             });
 
-            if (!accepted) admin.PrintToChat("[CS2-SimpleAdmin] Server is busy, try again in a moment.");
+            if (!accepted) admin.PrintToChat("[CS2-SimpleAdmin] Сервер занят. Попробуйте чуть позже.");
         }
 
         /// <summary>
@@ -417,7 +417,7 @@ public abstract class BasicMenu
             string localizedTitle;
             using (new WithTemporaryCulture(admin.GetLanguage()))
             {
-                localizedTitle = $"{localizer?["sa_team_force"] ?? "Force Team"}: {target.PlayerName}";
+                localizedTitle = $"{localizer?["sa_team_force"] ?? "Сменить команду"}: {target.PlayerName}";
             }
 
             var teamSelectionMenu = new MenuBuilder(localizedTitle);
@@ -428,8 +428,8 @@ public abstract class BasicMenu
             {
                 ctName = localizer?["sa_team_ct"] ?? "CT";
                 tName = localizer?["sa_team_t"] ?? "T";
-                swapName = localizer?["sa_team_swap"] ?? "Swap";
-                specName = localizer?["sa_team_spec"] ?? "Spec";
+                swapName = localizer?["sa_team_swap"] ?? "Поменять команды местами";
+                specName = localizer?["sa_team_spec"] ?? "Наблюдатели";
             }
 
             var teams = new[]
@@ -464,7 +464,7 @@ public abstract class BasicMenu
             var localizer = CS2_SimpleAdmin._localizer;
             var pluginsMenu = new MenuBuilder("sa_menu_pluginsmanager_title", admin, localizer);
 
-            pluginsMenu.AddOption("Open Plugins Manager", _ =>
+            pluginsMenu.AddOption("Открыть список плагинов", _ =>
             {
                 admin.ExecuteClientCommandFromServer("css_pluginsmanager");
             });
@@ -515,7 +515,7 @@ public abstract class BasicMenu
             var localizer = CS2_SimpleAdmin._localizer;
             var restartMenu = new MenuBuilder("sa_restart_game", admin, localizer);
 
-            restartMenu.AddOption("Restart Round", _ =>
+            restartMenu.AddOption("Перезапустить раунд", _ =>
             {
                 CS2_SimpleAdmin.RestartGame(admin);
             });
@@ -594,7 +594,7 @@ public abstract class BasicMenu
             string localizedTitle;
             using (new WithTemporaryCulture(admin.GetLanguage()))
             {
-                localizedTitle = $"{localizer?["sa_admin_add"] ?? "Add Admin"}: {target.PlayerName}";
+                localizedTitle = $"{localizer?["sa_admin_add"] ?? "Добавить администратора"}: {target.PlayerName}";
             }
 
             var flagsMenu = new MenuBuilder(localizedTitle);
@@ -655,7 +655,7 @@ public abstract class BasicMenu
             var localizer = CS2_SimpleAdmin._localizer;
             var reloadMenu = new MenuBuilder("sa_admin_reload", admin, localizer);
 
-            reloadMenu.AddOption("Reload Admins", _ =>
+            reloadMenu.AddOption("Обновить список администраторов", _ =>
             {
                 CS2_SimpleAdmin.Instance.ReloadAdmins(admin);
             });
@@ -693,7 +693,7 @@ public abstract class BasicMenu
             using (new WithTemporaryCulture(admin.GetLanguage()))
             {
                 localizedAction = localizer?[actionKey] ?? actionName;
-                durationText = localizer?["sa_duration"] ?? "Duration";
+                durationText = localizer?["sa_duration"] ?? "Срок";
             }
 
             var durationMenu = new MenuBuilder($"{localizedAction} {durationText}: {player.PlayerName}");
@@ -738,7 +738,7 @@ public abstract class BasicMenu
             using (new WithTemporaryCulture(admin.GetLanguage()))
             {
                 localizedAction = localizer?[actionKey] ?? actionName;
-                reasonText = localizer?["sa_reason"] ?? "Reason";
+                reasonText = localizer?["sa_reason"] ?? "Причина";
             }
 
             var reasonMenu = new MenuBuilder($"{localizedAction} {reasonText}: {player.PlayerName}");

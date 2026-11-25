@@ -17,12 +17,12 @@ public static class CustomCommandsMenu
         {
             admin.PrintToChat(localizer?["sa_prefix"] ??
                               "[SimpleAdmin] " +
-                              (localizer?["sa_no_permission"] ?? "You do not have permissions to use this command")
+                              (localizer?["sa_no_permission"] ?? "У вас нет прав на использование этой команды.")
             );
             return;
         }
 
-        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_custom_commands"] ?? "Custom Commands");
+        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_custom_commands"] ?? "Дополнительные команды");
         List<ChatMenuOptionData> options = [];
 
         var customCommands = CS2_SimpleAdmin.Instance.Config.CustomServerCommands;
