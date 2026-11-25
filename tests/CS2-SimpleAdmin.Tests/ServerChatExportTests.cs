@@ -34,7 +34,11 @@ public class ServerChatExportTests
             var rejected = await ReadPayloadAsync(listener, 503, key, timeout.Token);
             Assert.Single(Directory.GetFiles(spool, "*.json"));
 
-            var accepted = await ReadPayloadAsync(listener, 200, key, timeout.Token);
+            var wrongAck = await ReadPayloadAsync(listener, 200, key, timeout.Token, "{}");
+            Assert.Equal(rejected, wrongAck);
+            Assert.Single(Directory.GetFiles(spool, "*.json"));
+
+            var accepted = await ReadPayloadAsync(listener, 200, key, timeout.Token, "{\"ok\":true}");
             Assert.Equal(rejected, accepted);
             using var payload = JsonDocument.Parse(accepted);
             Assert.Equal(2, payload.RootElement.GetArrayLength());
@@ -68,7 +72,7 @@ public class ServerChatExportTests
         }
     }
 
-    private static async Task<string> ReadPayloadAsync(TcpListener listener, int status, string key, CancellationToken token)
+    private static async Task<string> ReadPayloadAsync(TcpListener listener, int status, string key, CancellationToken token, string response = "")
     {
         using var client = await listener.AcceptTcpClientAsync(token);
         await using var stream = client.GetStream();
@@ -86,7 +90,7 @@ public class ServerChatExportTests
         var body = new char[int.Parse(headers["Content-Length"])];
         Assert.Equal(body.Length, await reader.ReadBlockAsync(body.AsMemory(), token));
         var reason = status == 200 ? "OK" : "Service Unavailable";
-        await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), token);
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {status} {reason}\r\nContent-Length: {response.Length}\r\nConnection: close\r\n\r\n{response}"), token);
         return new string(body);
     }
 }

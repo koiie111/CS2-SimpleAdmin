@@ -119,7 +119,8 @@ internal sealed class ServerChatExport
 
             using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
-                Timeout = TimeSpan.FromSeconds(8)
+                Timeout = TimeSpan.FromSeconds(8),
+                MaxResponseContentBufferSize = 4096
             };
             client.DefaultRequestHeaders.Add("X-Server-Chat-Id", _serverId.ToString(CultureInfo.InvariantCulture));
             client.DefaultRequestHeaders.Add("X-Server-Chat-Key", _apiKey);
@@ -216,9 +217,15 @@ internal sealed class ServerChatExport
             using var content = new StreamContent(stream);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = content };
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            using var response = await client.SendAsync(request, token);
             if (response.StatusCode == HttpStatusCode.OK)
-                return true;
+            {
+                using var acknowledgement = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(token));
+                if (acknowledgement.RootElement.ValueKind == JsonValueKind.Object
+                    && acknowledgement.RootElement.TryGetProperty("ok", out var ok)
+                    && ok.ValueKind == JsonValueKind.True)
+                    return true;
+            }
 
             _log.LogWarning("Server chat endpoint returned {StatusCode}. Batch retained for retry.", (int)response.StatusCode);
             return false;
@@ -229,6 +236,11 @@ internal sealed class ServerChatExport
         }
         catch (HttpRequestException)
         {
+            return false;
+        }
+        catch (JsonException)
+        {
+            _log.LogWarning("Server chat endpoint returned an invalid acknowledgement. Batch retained for retry.");
             return false;
         }
     }
