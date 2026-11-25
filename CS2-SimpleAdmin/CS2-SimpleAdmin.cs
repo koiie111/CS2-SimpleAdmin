@@ -155,6 +155,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         }
     }
 
+    private ServerChatExport? _chatExport;
+
     public void OnConfigParsed(CS2_SimpleAdminConfig config)
     {
         _logger = Logger; // fork: before UpdateConfig so its warnings are logged
@@ -275,6 +277,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
             Directory.CreateDirectory(ModuleDirectory + "/data");
         }
 
+        _chatExport?.Stop();
+        _chatExport = ServerChatExport.Start(config.ServerChatExport, Path.Combine(ModuleDirectory, "data"), Logger);
         _localizer = Localizer;
 
         if (!string.IsNullOrEmpty(Config.Discord.DiscordLogWebhook))
@@ -314,6 +318,8 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
     public override void Unload(bool hotReload)
     {
         // Cancel and invalidate background work first; never wait for it here (game thread).
+        _chatExport?.Stop();
+        _chatExport = null;
         Runtime.Stop();
         PeriodicMaintenance.Reset();
         CacheManager?.Dispose();

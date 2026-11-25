@@ -281,6 +281,9 @@ public class CS2_SimpleAdminConfig : BasePluginConfig
     [JsonPropertyName("OtherSettings")]
     public OtherSettings OtherSettings { get; set; } = new();
 
+    [JsonPropertyName("ServerChatExport")]
+    public Infrastructure.ServerChatExportConfig ServerChatExport { get; set; } = new();
+
     [JsonPropertyName("EnableMetrics")]
     public bool EnableMetrics { get; set; } = true;
 
