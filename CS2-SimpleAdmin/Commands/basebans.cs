@@ -346,7 +346,7 @@ public partial class CS2_SimpleAdmin
     public void OnUnbanCommand(CCSPlayerController? caller, CommandInfo command)
     {
         if (DatabaseProvider == null) return;
-        var callerSteamId = caller?.SteamID.ToString() ?? _localizer?["sa_console"] ?? "Консоль";
+        var callerSteamId = caller?.SteamID.ToString() ?? "Console";
         if (command.GetArg(1).Length <= 1)
         {
             command.ReplyToCommand($"Поисковый запрос слишком короткий.");

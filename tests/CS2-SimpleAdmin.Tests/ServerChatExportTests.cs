@@ -54,21 +54,89 @@ public class ServerChatExportTests
         }
         finally
         {
-            worker.Stop();
-            // Wait for cleanup in the test only. The plugin never waits in Unload.
-            var stopDeadline = DateTime.UtcNow.AddSeconds(4);
-            while (DateTime.UtcNow < stopDeadline)
+            await worker.Stop().WaitAsync(TimeSpan.FromSeconds(12));
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RecoversQueuedChatAfterOutboxBecomesAvailable(bool stopWhileLocked)
+    {
+        var directory = Directory.CreateTempSubdirectory("simpleadmin-chat-reload-");
+        var spool = Directory.CreateDirectory(Path.Combine(directory.FullName, "server-chat", "42"));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        var key = new string('b', 64);
+        var lockPath = Path.Combine(spool.FullName, "worker.lock");
+        // A directory at the lock path causes a filesystem error. A held file models the previous worker on reload.
+        if (!stopWhileLocked) Directory.CreateDirectory(lockPath);
+        using var held = stopWhileLocked ? File.Open(lockPath, FileMode.Create, FileAccess.Write, FileShare.None) : null;
+        var worker = ServerChatExport.Start(new ServerChatExportConfig
+        {
+            Endpoint = $"http://127.0.0.1:{endpoint.Port}/ingest", ServerId = 42, ApiKey = key
+        }, directory.FullName, NullLogger.Instance)!;
+        try
+        {
+            worker.Capture(76561198000000001UL, "player", "", "queued");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var stopping = stopWhileLocked ? worker.Stop() : null;
+            await Task.Delay(300, timeout.Token);
+            if (stopping != null)
             {
-                try
-                {
-                    directory.Delete(recursive: true);
-                    break;
-                }
-                catch (IOException)
-                {
-                    await Task.Delay(25);
-                }
+                held!.Dispose();
+                await stopping.WaitAsync(timeout.Token);
+                var file = Assert.Single(spool.GetFiles("*.json"));
+                using var data = JsonDocument.Parse(await File.ReadAllBytesAsync(file.FullName, timeout.Token));
+                Assert.Equal("queued", data.RootElement[0].GetProperty("message").GetString());
             }
+            else
+            {
+                Directory.Delete(lockPath);
+                var body = await ReadPayloadAsync(listener, 200, key, timeout.Token, "{\"ok\":true}");
+                using var data = JsonDocument.Parse(body);
+                Assert.Equal("queued", data.RootElement[0].GetProperty("message").GetString());
+            }
+        }
+        finally
+        {
+            held?.Dispose();
+            await worker.Stop().WaitAsync(TimeSpan.FromSeconds(12));
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectedBatchDoesNotBlockLaterChatOrDiscardTheOriginal()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var endpoint = (IPEndPoint)listener.LocalEndpoint;
+        var directory = Directory.CreateTempSubdirectory("simpleadmin-chat-replay-");
+        var spool = Directory.CreateDirectory(Path.Combine(directory.FullName, "server-chat", "42"));
+        var first = Path.Combine(spool.FullName, "001.json");
+        var second = Path.Combine(spool.FullName, "002.json");
+        await File.WriteAllTextAsync(first, "[1]", timeout.Token);
+        await File.WriteAllTextAsync(second, "[2]", timeout.Token);
+        var key = new string('a', 64);
+        var worker = ServerChatExport.Start(new ServerChatExportConfig
+        {
+            Endpoint = $"http://127.0.0.1:{endpoint.Port}/ingest", ServerId = 42, ApiKey = key
+        }, directory.FullName, NullLogger.Instance)!;
+        try
+        {
+            Assert.Equal("[1]", await ReadPayloadAsync(listener, 422, key, timeout.Token));
+            Assert.Equal("[2]", await ReadPayloadAsync(listener, 200, key, timeout.Token, "{\"ok\":true}"));
+            while (File.Exists(second)) await Task.Delay(25, timeout.Token);
+            Assert.Equal("[1]", await File.ReadAllTextAsync(first, timeout.Token));
+        }
+        finally
+        {
+            await worker.Stop().WaitAsync(TimeSpan.FromSeconds(12));
+            directory.Delete(recursive: true);
         }
     }
 

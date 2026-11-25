@@ -22,6 +22,8 @@ internal sealed class ServerChatExport
     private static readonly TimeSpan Retention = TimeSpan.FromDays(7);
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(2);
 
+    private enum Delivery { Acknowledged, RetryEndpoint, RetryBatch }
+    private readonly record struct Batch(string Path, long Size);
     private readonly record struct ChatLine(long At, ulong SteamId, string Nickname, string Team, string Text);
 
     private sealed record Row(
@@ -45,6 +47,7 @@ internal sealed class ServerChatExport
     private readonly int _serverId;
     private readonly string _spool;
     private readonly ILogger _log;
+    private readonly Task _worker;
     private long _dropped;
 
     internal static ServerChatExport? Start(ServerChatExportConfig? config, string dataPath, ILogger log)
@@ -71,7 +74,7 @@ internal sealed class ServerChatExport
         _serverId = config.ServerId;
         _spool = Path.Combine(dataPath, "server-chat", _serverId.ToString(CultureInfo.InvariantCulture));
         _log = log;
-        _ = Task.Run(RunAsync);
+        _worker = Task.Run(RunAsync);
     }
 
     internal void Capture(ulong steamId, string nickname, string team, string text)
@@ -80,40 +83,64 @@ internal sealed class ServerChatExport
             Interlocked.Increment(ref _dropped);
     }
 
-    internal void Stop()
+    internal Task Stop()
     {
         _queue.Writer.TryComplete();
         _ = _stop.CancelAsync();
+        return _worker;
     }
 
     private async Task RunAsync()
     {
         var token = _stop.Token;
-        FileStream? spoolLock = null;
-        var files = new Queue<(string Path, long Size)>();
         var pending = new List<ChatLine>(BatchSize);
+        var failuresDuringShutdown = 0;
+        while (true)
+        {
+            try
+            {
+                await RunWithSpoolAsync(pending, token);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                _log.LogWarning("Cannot access server chat outbox ({ErrorType}). Retrying.", error.GetType().Name);
+                if (token.IsCancellationRequested)
+                {
+                    if (pending.Count == 0 && !_queue.Reader.TryPeek(out _))
+                        return;
+                    if (++failuresDuringShutdown >= 5)
+                    {
+                        _log.LogError("Cannot flush server chat messages before unload.");
+                        return;
+                    }
+                }
+                await Task.Delay(Interval);
+            }
+            catch (Exception error)
+            {
+                _log.LogError("Server chat export stopped due to {ErrorType}.", error.GetType().Name);
+                return;
+            }
+        }
+    }
+
+    private async Task RunWithSpoolAsync(List<ChatLine> pending, CancellationToken token)
+    {
+        // Rebuild the index after an I/O failure. Only clear pending after its atomic rename succeeds.
+        Directory.CreateDirectory(_spool);
+        using var spoolLock = new FileStream(Path.Combine(_spool, "worker.lock"), FileMode.OpenOrCreate,
+            FileAccess.ReadWrite, FileShare.None);
+        var files = new Queue<Batch>();
+        var deferred = new Queue<(Batch Batch, DateTimeOffset RetryAt)>();
         long diskBytes = 0;
         try
         {
-            Directory.CreateDirectory(_spool);
-            while (spoolLock is null)
-            {
-                token.ThrowIfCancellationRequested();
-                try
-                {
-                    spoolLock = new FileStream(Path.Combine(_spool, "worker.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                }
-                catch (IOException)
-                {
-                    await Task.Delay(Interval, token);
-                }
-            }
-
             foreach (var temporary in Directory.EnumerateFiles(_spool, "*.tmp")) File.Delete(temporary);
             foreach (var path in Directory.EnumerateFiles(_spool, "*.json").Order(StringComparer.Ordinal))
             {
                 var file = new FileInfo(path);
-                files.Enqueue((path, file.Length));
+                files.Enqueue(new Batch(path, file.Length));
                 diskBytes += file.Length;
             }
 
@@ -130,6 +157,8 @@ internal sealed class ServerChatExport
             using var timer = new PeriodicTimer(Interval);
             while (await timer.WaitForNextTickAsync(token))
             {
+                while (deferred.TryPeek(out var entry) && entry.RetryAt <= DateTimeOffset.UtcNow)
+                    files.Enqueue(deferred.Dequeue().Batch);
                 var expired = DateTime.UtcNow - Retention;
                 while (files.TryPeek(out var oldest) && File.GetLastWriteTimeUtc(oldest.Path) < expired)
                     RemoveFirst();
@@ -142,7 +171,18 @@ internal sealed class ServerChatExport
                 // Bound work per wakeup so uploads cannot starve persistence during a backlog.
                 for (var index = 0; index < 8 && files.TryPeek(out var batch); index++)
                 {
-                    if (!await DeliverAsync(client, batch.Path, token))
+                    if (File.GetLastWriteTimeUtc(batch.Path) < expired)
+                    {
+                        RemoveFirst();
+                        continue;
+                    }
+                    var result = await DeliverAsync(client, batch.Path, token);
+                    if (result == Delivery.RetryBatch)
+                    {
+                        deferred.Enqueue((files.Dequeue(), DateTimeOffset.UtcNow.AddMinutes(5)));
+                        continue;
+                    }
+                    if (result == Delivery.RetryEndpoint)
                     {
                         nextAttempt = DateTimeOffset.UtcNow + retry;
                         retry = TimeSpan.FromSeconds(Math.Min(60, retry.TotalSeconds * 2));
@@ -155,20 +195,8 @@ internal sealed class ServerChatExport
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception error)
-        {
-            _log.LogError("Server chat export stopped due to {ErrorType}.", error.GetType().Name);
-        }
-        finally
-        {
-            if (spoolLock != null)
-            {
-                try { Persist(int.MaxValue); }
-                catch (Exception error) { _log.LogError("Cannot save server chat outbox: {ErrorType}.", error.GetType().Name); }
-                spoolLock.Dispose();
-            }
-            ReportDrops();
-        }
+        Persist(int.MaxValue);
+        ReportDrops();
 
         void RemoveFirst()
         {
@@ -202,14 +230,14 @@ internal sealed class ServerChatExport
                 var path = Path.Combine(_spool, name + "-" + Guid.NewGuid().ToString("N") + ".json");
                 File.WriteAllBytes(path + ".tmp", data);
                 File.Move(path + ".tmp", path);
-                files.Enqueue((path, data.Length));
+                files.Enqueue(new Batch(path, data.Length));
                 diskBytes += data.Length;
                 pending.Clear();
             }
         }
     }
 
-    private async Task<bool> DeliverAsync(HttpClient client, string path, CancellationToken token)
+    private async Task<Delivery> DeliverAsync(HttpClient client, string path, CancellationToken token)
     {
         try
         {
@@ -224,24 +252,29 @@ internal sealed class ServerChatExport
                 if (acknowledgement.RootElement.ValueKind == JsonValueKind.Object
                     && acknowledgement.RootElement.TryGetProperty("ok", out var ok)
                     && ok.ValueKind == JsonValueKind.True)
-                    return true;
+                    return Delivery.Acknowledged;
             }
 
+            if (response.StatusCode is HttpStatusCode.UnprocessableEntity or HttpStatusCode.RequestEntityTooLarge)
+            {
+                _log.LogWarning("Server chat batch rejected ({StatusCode}). Retained for a later retry.", (int)response.StatusCode);
+                return Delivery.RetryBatch;
+            }
             _log.LogWarning("Server chat endpoint returned {StatusCode}. Batch retained for retry.", (int)response.StatusCode);
-            return false;
+            return Delivery.RetryEndpoint;
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
-            return false;
+            return Delivery.RetryEndpoint;
         }
         catch (HttpRequestException)
         {
-            return false;
+            return Delivery.RetryEndpoint;
         }
         catch (JsonException)
         {
             _log.LogWarning("Server chat endpoint returned an invalid acknowledgement. Batch retained for retry.");
-            return false;
+            return Delivery.RetryEndpoint;
         }
     }
 

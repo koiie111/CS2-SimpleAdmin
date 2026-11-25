@@ -277,7 +277,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
             Directory.CreateDirectory(ModuleDirectory + "/data");
         }
 
-        _chatExport?.Stop();
+        _ = _chatExport?.Stop();
         _chatExport = ServerChatExport.Start(config.ServerChatExport, Path.Combine(ModuleDirectory, "data"), Logger);
         _localizer = Localizer;
 
@@ -318,7 +318,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
     public override void Unload(bool hotReload)
     {
         // Cancel and invalidate background work first; never wait for it here (game thread).
-        _chatExport?.Stop();
+        _ = _chatExport?.Stop();
         _chatExport = null;
         Runtime.Stop();
         PeriodicMaintenance.Reset();
