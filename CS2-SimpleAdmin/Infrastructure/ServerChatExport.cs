@@ -1,0 +1,294 @@
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
+
+namespace CS2_SimpleAdmin.Infrastructure;
+
+public sealed class ServerChatExportConfig
+{
+    public string Endpoint { get; set; } = "";
+    public int ServerId { get; set; }
+    public string ApiKey { get; set; } = "";
+}
+
+internal sealed class ServerChatExport
+{
+    private const int BatchSize = 64;
+    private const long DiskLimit = 64L * 1024 * 1024;
+    private static readonly TimeSpan Retention = TimeSpan.FromDays(7);
+    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(2);
+
+    private enum Delivery { Acknowledged, RetryEndpoint, RetryBatch }
+    private readonly record struct Batch(string Path, long Size);
+    private readonly record struct ChatLine(long At, ulong SteamId, string Nickname, string Team, string Text);
+
+    private sealed record Row(
+        [property: JsonPropertyName("event_id")] string EventId,
+        [property: JsonPropertyName("sent_at")] long At,
+        [property: JsonPropertyName("steam_id")] string SteamId,
+        [property: JsonPropertyName("nickname")] string Nickname,
+        [property: JsonPropertyName("team")] string Team,
+        [property: JsonPropertyName("message")] string Text);
+
+    private readonly Channel<ChatLine> _queue = Channel.CreateBounded<ChatLine>(new BoundedChannelOptions(8192)
+    {
+        SingleReader = true,
+        SingleWriter = true,
+        FullMode = BoundedChannelFullMode.Wait,
+        AllowSynchronousContinuations = false
+    });
+    private readonly CancellationTokenSource _stop = new();
+    private readonly Uri _endpoint;
+    private readonly string _apiKey;
+    private readonly int _serverId;
+    private readonly string _spool;
+    private readonly ILogger _log;
+    private readonly Task _worker;
+    private long _dropped;
+
+    internal static ServerChatExport? Start(ServerChatExportConfig? config, string dataPath, ILogger log)
+    {
+        if (config is null || string.IsNullOrWhiteSpace(config.Endpoint))
+            return null;
+
+        if (config.ServerId <= 0 || config.ApiKey is not { Length: 64 }
+            || config.ApiKey.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f'))
+            || !Uri.TryCreate(config.Endpoint, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && !(uri.IsLoopback && uri.Scheme == Uri.UriSchemeHttp)))
+        {
+            log.LogWarning("Invalid ServerChatExport settings. Chat export is disabled.");
+            return null;
+        }
+
+        return new ServerChatExport(config, uri, dataPath, log);
+    }
+
+    private ServerChatExport(ServerChatExportConfig config, Uri endpoint, string dataPath, ILogger log)
+    {
+        _endpoint = endpoint;
+        _apiKey = config.ApiKey;
+        _serverId = config.ServerId;
+        _spool = Path.Combine(dataPath, "server-chat", _serverId.ToString(CultureInfo.InvariantCulture));
+        _log = log;
+        _worker = Task.Run(RunAsync);
+    }
+
+    internal void Capture(ulong steamId, string nickname, string team, string text)
+    {
+        if (!_queue.Writer.TryWrite(new ChatLine(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), steamId, nickname, team, text)))
+            Interlocked.Increment(ref _dropped);
+    }
+
+    internal Task Stop()
+    {
+        _queue.Writer.TryComplete();
+        _ = _stop.CancelAsync();
+        return _worker;
+    }
+
+    private async Task RunAsync()
+    {
+        var token = _stop.Token;
+        var pending = new List<ChatLine>(BatchSize);
+        var failuresDuringShutdown = 0;
+        while (true)
+        {
+            try
+            {
+                await RunWithSpoolAsync(pending, token);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                _log.LogWarning("Cannot access server chat outbox ({ErrorType}). Retrying.", error.GetType().Name);
+                if (token.IsCancellationRequested)
+                {
+                    if (pending.Count == 0 && !_queue.Reader.TryPeek(out _))
+                        return;
+                    if (++failuresDuringShutdown >= 5)
+                    {
+                        _log.LogError("Cannot flush server chat messages before unload.");
+                        return;
+                    }
+                }
+                await Task.Delay(Interval);
+            }
+            catch (Exception error)
+            {
+                _log.LogError("Server chat export stopped due to {ErrorType}.", error.GetType().Name);
+                return;
+            }
+        }
+    }
+
+    private async Task RunWithSpoolAsync(List<ChatLine> pending, CancellationToken token)
+    {
+        // Rebuild the index after an I/O failure. Only clear pending after its atomic rename succeeds.
+        Directory.CreateDirectory(_spool);
+        using var spoolLock = new FileStream(Path.Combine(_spool, "worker.lock"), FileMode.OpenOrCreate,
+            FileAccess.ReadWrite, FileShare.None);
+        var files = new Queue<Batch>();
+        var deferred = new Queue<(Batch Batch, DateTimeOffset RetryAt)>();
+        long diskBytes = 0;
+        try
+        {
+            foreach (var temporary in Directory.EnumerateFiles(_spool, "*.tmp")) File.Delete(temporary);
+            foreach (var path in Directory.EnumerateFiles(_spool, "*.json").Order(StringComparer.Ordinal))
+            {
+                var file = new FileInfo(path);
+                files.Enqueue(new Batch(path, file.Length));
+                diskBytes += file.Length;
+            }
+
+            using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            {
+                Timeout = TimeSpan.FromSeconds(8),
+                MaxResponseContentBufferSize = 4096
+            };
+            client.DefaultRequestHeaders.Add("X-Server-Chat-Id", _serverId.ToString(CultureInfo.InvariantCulture));
+            client.DefaultRequestHeaders.Add("X-Server-Chat-Key", _apiKey);
+
+            TimeSpan retry = Interval;
+            var nextAttempt = DateTimeOffset.MinValue;
+            using var timer = new PeriodicTimer(Interval);
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                while (deferred.TryPeek(out var entry) && entry.RetryAt <= DateTimeOffset.UtcNow)
+                    files.Enqueue(deferred.Dequeue().Batch);
+                var expired = DateTime.UtcNow - Retention;
+                while (files.TryPeek(out var oldest) && File.GetLastWriteTimeUtc(oldest.Path) < expired)
+                    RemoveFirst();
+
+                Persist(8);
+                ReportDrops();
+                if (DateTimeOffset.UtcNow < nextAttempt)
+                    continue;
+
+                // Bound work per wakeup so uploads cannot starve persistence during a backlog.
+                for (var index = 0; index < 8 && files.TryPeek(out var batch); index++)
+                {
+                    if (File.GetLastWriteTimeUtc(batch.Path) < expired)
+                    {
+                        RemoveFirst();
+                        continue;
+                    }
+                    var result = await DeliverAsync(client, batch.Path, token);
+                    if (result == Delivery.RetryBatch)
+                    {
+                        deferred.Enqueue((files.Dequeue(), DateTimeOffset.UtcNow.AddMinutes(5)));
+                        continue;
+                    }
+                    if (result == Delivery.RetryEndpoint)
+                    {
+                        nextAttempt = DateTimeOffset.UtcNow + retry;
+                        retry = TimeSpan.FromSeconds(Math.Min(60, retry.TotalSeconds * 2));
+                        break;
+                    }
+                    RemoveFirst();
+                    retry = Interval;
+                    nextAttempt = DateTimeOffset.MinValue;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        Persist(int.MaxValue);
+        ReportDrops();
+
+        void RemoveFirst()
+        {
+            var first = files.Peek();
+            File.Delete(first.Path);
+            files.Dequeue();
+            diskBytes -= first.Size;
+        }
+
+        void Persist(int batches)
+        {
+            for (var index = 0; index < batches; index++)
+            {
+                while (pending.Count < BatchSize && _queue.Reader.TryRead(out var item))
+                    pending.Add(item);
+
+                if (pending.Count == 0)
+                    return;
+
+                var data = JsonSerializer.SerializeToUtf8Bytes(pending.Select(line => new Row(
+                    Guid.NewGuid().ToString("N"), line.At, line.SteamId.ToString(CultureInfo.InvariantCulture),
+                    Limit(line.Nickname, 128), line.Team, Limit(line.Text, 512))).ToArray());
+                if (diskBytes + data.Length > DiskLimit)
+                {
+                    Interlocked.Add(ref _dropped, pending.Count);
+                    pending.Clear();
+                    continue;
+                }
+
+                var name = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("D15", CultureInfo.InvariantCulture);
+                var path = Path.Combine(_spool, name + "-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllBytes(path + ".tmp", data);
+                File.Move(path + ".tmp", path);
+                files.Enqueue(new Batch(path, data.Length));
+                diskBytes += data.Length;
+                pending.Clear();
+            }
+        }
+    }
+
+    private async Task<Delivery> DeliverAsync(HttpClient client, string path, CancellationToken token)
+    {
+        try
+        {
+            await using var stream = File.OpenRead(path);
+            using var content = new StreamContent(stream);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = content };
+            using var response = await client.SendAsync(request, token);
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                using var acknowledgement = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(token));
+                if (acknowledgement.RootElement.ValueKind == JsonValueKind.Object
+                    && acknowledgement.RootElement.TryGetProperty("ok", out var ok)
+                    && ok.ValueKind == JsonValueKind.True)
+                    return Delivery.Acknowledged;
+            }
+
+            if (response.StatusCode is HttpStatusCode.UnprocessableEntity or HttpStatusCode.RequestEntityTooLarge)
+            {
+                _log.LogWarning("Server chat batch rejected ({StatusCode}). Retained for a later retry.", (int)response.StatusCode);
+                return Delivery.RetryBatch;
+            }
+            _log.LogWarning("Server chat endpoint returned {StatusCode}. Batch retained for retry.", (int)response.StatusCode);
+            return Delivery.RetryEndpoint;
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            return Delivery.RetryEndpoint;
+        }
+        catch (HttpRequestException)
+        {
+            return Delivery.RetryEndpoint;
+        }
+        catch (JsonException)
+        {
+            _log.LogWarning("Server chat endpoint returned an invalid acknowledgement. Batch retained for retry.");
+            return Delivery.RetryEndpoint;
+        }
+    }
+
+    private void ReportDrops()
+    {
+        var dropped = Interlocked.Exchange(ref _dropped, 0);
+        if (dropped > 0)
+            _log.LogWarning("Server chat outbox reached its limit. {Dropped} messages dropped.", dropped);
+    }
+
+    private static string Limit(string value, int size)
+    {
+        if (value.Length <= size)
+            return value;
+        return value[..(char.IsHighSurrogate(value[size - 1]) ? size - 1 : size)];
+    }
+}

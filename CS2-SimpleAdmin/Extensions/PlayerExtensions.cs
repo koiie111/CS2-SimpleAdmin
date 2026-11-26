@@ -222,7 +222,7 @@ public static class PlayerExtensions
     /// <param name="newName">The new name to assign.</param>
     public static void Rename(this CCSPlayerController? controller, string newName = "Unknown")
     {
-        newName ??= CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+        newName ??= CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
 
         if (controller != null)
         {

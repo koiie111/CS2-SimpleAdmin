@@ -321,7 +321,7 @@ internal static class Helper
 
     /*public static IEnumerable<Embed> GenerateEmbedsDiscord(string title, string description, string thumbnailUrl, Color color, string[] fieldNames, string[] fieldValues, bool[] inlineFlags)
 	{
-		var hostname = ConVar.Find("hostname")?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+		var hostname = ConVar.Find("hostname")?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
 		var address = $"{ConVar.Find("ip")?.StringValue}:{ConVar.Find("hostport")!.GetPrimitiveValue<int>()}";
 
 		description = description.Replace("{hostname}", hostname);
@@ -337,8 +337,8 @@ internal static class Helper
 
 		for (var i = 0; i < fieldNames.Length; i++)
 		{
-			fieldValues[i] = fieldValues[i].Replace("{hostname}", hostname ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown");
-			fieldValues[i] = fieldValues[i].Replace("{address}", address ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown");
+			fieldValues[i] = fieldValues[i].Replace("{hostname}", hostname ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно");
+			fieldValues[i] = fieldValues[i].Replace("{address}", address ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно");
 
 			embed.AddField(fieldNames[i], fieldValues[i], inlineFlags[i]);
 
@@ -356,7 +356,7 @@ internal static class Helper
         if (CS2_SimpleAdmin.DiscordWebhookClientLog == null || localizer == null) return;
 
         var communityUrl = caller != null ? "<" + new SteamID(caller.SteamID).ToCommunityUrl() + ">" : "<https://steamcommunity.com/profiles/0>";
-        var callerName = caller != null ? caller.PlayerName : CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : CS2_SimpleAdmin._localizer?["sa_console"] ?? "Консоль";
         _ = CS2_SimpleAdmin.DiscordWebhookClientLog.SendMessageAsync(GenerateMessageDiscord(localizer["sa_discord_log_command", $"[{callerName}]({communityUrl})", command.GetCommandString]));
     }
 
@@ -365,7 +365,7 @@ internal static class Helper
         if (CS2_SimpleAdmin.DiscordWebhookClientLog == null || localizer == null) return;
 
         var communityUrl = caller != null ? "<" + new SteamID(caller.SteamID).ToCommunityUrl() + ">" : "<https://steamcommunity.com/profiles/0>";
-        var callerName = caller != null ? caller.PlayerName : CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console";
+        var callerName = caller != null ? caller.PlayerName : CS2_SimpleAdmin._localizer?["sa_console"] ?? "Консоль";
         _ = CS2_SimpleAdmin.DiscordWebhookClientLog.SendMessageAsync(GenerateMessageDiscord(localizer["sa_discord_log_command", $"[{callerName}]({communityUrl})", command]));
     }
 
@@ -383,9 +383,9 @@ internal static class Helper
         if (hideFromPlayers
             && !AdminManager.PlayerHasPermissions(new SteamID(recipient.SteamID), "@css/kick")
             && !AdminManager.PlayerHasPermissions(new SteamID(recipient.SteamID), "@css/ban"))
-            return (CS2_SimpleAdmin._localizer?["sa_admin"] ?? "Admin").ToString().ToUpperInvariant();
+            return (CS2_SimpleAdmin._localizer?["sa_admin"] ?? "Администратор").ToString().ToUpperInvariant();
 
-        return callerName ?? (CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console").ToString().ToUpperInvariant();
+        return callerName ?? (CS2_SimpleAdmin._localizer?["sa_console"] ?? "Консоль").ToString().ToUpperInvariant();
     }
 
     public static void ShowAdminActivity(string messageKey, string? callerName = null, bool dontPublish = false, params object[] messageArgs)
@@ -582,7 +582,7 @@ internal static class Helper
         var callerCommunityUrl = caller != null ? $"<{new SteamID(caller.SteamID).ToCommunityUrl()}>" : defaultCommunityUrl;
         var targetCommunityUrl = target != null ? $"<{new SteamID(target.SteamID).ToCommunityUrl()}>" : defaultCommunityUrl;
 
-        var callerName = caller?.PlayerName ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console";
+        var callerName = caller?.PlayerName ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Консоль";
         var targetName = target?.PlayerName ?? localizer["sa_unknown"];
         var targetSteamId = target != null ? new SteamID(target.SteamID).SteamId64.ToString() : localizer["sa_unknown"];
 
@@ -666,7 +666,7 @@ internal static class Helper
         var callerCommunityUrl = caller != null ? $"<{new SteamID(caller.SteamID).ToCommunityUrl()}>" : defaultCommunityUrl;
         var targetCommunityUrl = $"<{new SteamID(ulong.Parse(steamId)).ToCommunityUrl()}>";
 
-        var callerName = caller?.PlayerName ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Console";
+        var callerName = caller?.PlayerName ?? CS2_SimpleAdmin._localizer?["sa_console"] ?? "Консоль";
         var targetName = steamId;
         var targetSteamId = steamId;
 
@@ -730,7 +730,7 @@ internal static class Helper
     
     private static string GenerateMessageDiscord(string message)
     {
-        var hostname = ConVar.Find("hostname")?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+        var hostname = ConVar.Find("hostname")?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
         var address = $"{ConVar.Find("ip")?.StringValue}:{ConVar.Find("hostport")!.GetPrimitiveValue<int>()}";
 
         message = message.Replace("HOSTNAME", hostname);

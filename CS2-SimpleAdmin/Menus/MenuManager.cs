@@ -285,7 +285,7 @@ public class MenuManager
         if (!AdminManager.PlayerHasPermissions(steamId, "@css/generic"))
         {
             player.PrintToChat(localizer?["sa_prefix"] ?? "[SimpleAdmin] " +
-                (localizer?["sa_no_permission"] ?? "You do not have permissions to use this command"));
+                (localizer?["sa_no_permission"] ?? "У вас нет прав на использование этой команды."));
             return;
         }
 

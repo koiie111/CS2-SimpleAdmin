@@ -379,7 +379,7 @@ public class R11_PenaltyOrderingTests
 
         Assert.Empty(f.Db.Active(type));
         Assert.Equal(0, InMemory(Kind(type)));
-        Assert.Contains(f.Console, m => m.StartsWith(type switch { 1 => "Unmuted", 2 => "Unsilenced", _ => "Ungagged" }));
+        Assert.Contains(f.Console, m => m.EndsWith(type switch { 1 => "Мут снят.", 2 => "Сайленс снят.", _ => "Гаг снят." }));
     }
 
     [Theory]
@@ -483,8 +483,8 @@ public class R11_PenaltyOrderingTests
         Assert.Equal(["new", "old"], f.Db.Active(1).Order().ToList());
         Assert.Equal(2, InMemory(PenaltyType.Mute)); // old (still in force: the SQL failed) and new
         Assert.Equal(0, f.VoiceResets);
-        Assert.Contains(f.Console, m => m.Contains("could NOT be saved"));
-        Assert.DoesNotContain(f.Console, m => m.StartsWith("Unmuted"));
+        Assert.Contains(f.Console, m => m.Contains("Не удалось сохранить действие"));
+        Assert.DoesNotContain(f.Console, m => m.EndsWith("Мут снят."));
 
     }
 
@@ -504,7 +504,7 @@ public class R11_PenaltyOrderingTests
 
         gate.SetResult(UnmuteOutcome.Removed);
         await f.World.PumpUntil(() => f.Console.Count > 0);
-        Assert.Equal(["Unmuted Bob."], f.Console);
+        Assert.Equal(["Bob: Мут снят."], f.Console);
         Assert.False(PlayerPenaltyManager.IsPenalized(Target.Slot, PenaltyType.Mute, out _));
     }
 
@@ -515,7 +515,7 @@ public class R11_PenaltyOrderingTests
         PenaltyRemoval.UnmuteSql = (_, _, _, _) => Task.FromResult(UnmuteOutcome.NothingActive);
         Assert.True(PenaltyRemoval.TryQueue(CallerRef.Console, "0", Steam.ToString(), "r", 2, Target, false, "Bob"));
         await f.World.PumpUntil(() => f.Console.Count > 0);
-        Assert.Equal(["Bob: no active silence found (nothing to remove)."], f.Console);
+        Assert.Equal(["Bob: Активного сайленса нет."], f.Console);
     }
 
     // =====================================================================================================

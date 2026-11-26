@@ -16,20 +16,20 @@ public static class ManageAdminsMenu
         {
             admin.PrintToChat(localizer?["sa_prefix"] ??
                               "[SimpleAdmin] " +
-                              (localizer?["sa_no_permission"] ?? "You do not have permissions to use this command")
+                              (localizer?["sa_no_permission"] ?? "У вас нет прав на использование этой команды.")
             );
             return;
         }
 
-        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_admins_manage"] ?? "Admins Manage");
+        var menu = AdminMenu.CreateMenu(localizer?["sa_menu_admins_manage"] ?? "Администраторы");
         List<ChatMenuOptionData> options =
         [
-            new(localizer?["sa_admin_add"] ?? "Add Admin",
-                () => PlayersMenu.OpenRealPlayersMenu(admin, localizer?["sa_admin_add"] ?? "Add Admin", AddAdminMenu)),
-            new(localizer?["sa_admin_remove"] ?? "Remove Admin",
-                () => PlayersMenu.OpenAdminPlayersMenu(admin, localizer?["sa_admin_remove"] ?? "Remove Admin", RemoveAdmin,
+            new(localizer?["sa_admin_add"] ?? "Добавить администратора",
+                () => PlayersMenu.OpenRealPlayersMenu(admin, localizer?["sa_admin_add"] ?? "Добавить администратора", AddAdminMenu)),
+            new(localizer?["sa_admin_remove"] ?? "Удалить администратора",
+                () => PlayersMenu.OpenAdminPlayersMenu(admin, localizer?["sa_admin_remove"] ?? "Удалить администратора", RemoveAdmin,
                     player => player != admin && admin.CanTarget(player))),
-            new(localizer?["sa_admin_reload"] ?? "Reload Admins", () => ReloadAdmins(admin))
+            new(localizer?["sa_admin_reload"] ?? "Перезагрузить список администраторов", () => ReloadAdmins(admin))
         ];
 
         foreach (var menuOptionData in options)
@@ -43,7 +43,7 @@ public static class ManageAdminsMenu
 
     private static void AddAdminMenu(CCSPlayerController admin, CCSPlayerController player)
     {
-        var menu = AdminMenu.CreateMenu($"{CS2_SimpleAdmin._localizer?["sa_admin_add"] ?? "Add Admin"}: {player.PlayerName}");
+        var menu = AdminMenu.CreateMenu($"{CS2_SimpleAdmin._localizer?["sa_admin_add"] ?? "Добавить администратора"}: {player.PlayerName}");
 
         foreach (var adminFlag in CS2_SimpleAdmin.Instance.Config.MenuConfigs.AdminFlags)
         {

@@ -124,54 +124,54 @@ public class MenuConfig
     [JsonPropertyName("Durations")]
     public DurationItem[] Durations { get; set; } =
     [
-        new() { Name = "1 minute", Duration = 1 },
-        new() { Name = "5 minutes", Duration = 5 },
-        new() { Name = "15 minutes", Duration = 15 },
-        new() { Name = "1 hour", Duration = 60 },
-        new() { Name = "1 day", Duration = 60 * 24 },
-        new() { Name = "7 days", Duration = 60 * 24 * 7 },
-        new() { Name = "14 days", Duration = 60 * 24 * 14 },
-        new() { Name = "30 days", Duration = 60 * 24 * 30 },
-        new() { Name = "Permanent", Duration = 0 }
+        new() { Name = "1 минута", Duration = 1 },
+        new() { Name = "5 минут", Duration = 5 },
+        new() { Name = "15 минут", Duration = 15 },
+        new() { Name = "1 час", Duration = 60 },
+        new() { Name = "1 день", Duration = 60 * 24 },
+        new() { Name = "7 дней", Duration = 60 * 24 * 7 },
+        new() { Name = "14 дней", Duration = 60 * 24 * 14 },
+        new() { Name = "30 дней", Duration = 60 * 24 * 30 },
+        new() { Name = "Навсегда", Duration = 0 }
     ];
 
     [JsonPropertyName("BanReasons")]
     public List<string> BanReasons { get; set; } =
     [
-        "Hacking",
-        "Voice Abuse",
-        "Chat Abuse",
-        "Admin disrespect",
-        "Other"
+        "Читы",
+        "Нарушение правил голосового чата",
+        "Нарушение правил текстового чата",
+        "Неуважение к администрации",
+        "Другая причина"
     ];
 
     [JsonPropertyName("KickReasons")]
     public List<string> KickReasons { get; set; } =
     [
-        "Voice Abuse",
-        "Chat Abuse",
-        "Admin disrespect",
-        "Other"
+        "Нарушение правил голосового чата",
+        "Нарушение правил текстового чата",
+        "Неуважение к администрации",
+        "Другая причина"
     ];
 
     [JsonPropertyName("WarnReasons")]
     public List<string> WarnReasons { get; set; } =
     [
-        "Voice Abuse",
-        "Chat Abuse",
-        "Admin disrespect",
-        "Other"
+        "Нарушение правил голосового чата",
+        "Нарушение правил текстового чата",
+        "Неуважение к администрации",
+        "Другая причина"
     ];
 
     [JsonPropertyName("MuteReasons")]
     public List<string> MuteReasons { get; set; } =
     [
-        "Advertising",
-        "Spamming",
-        "Spectator camera abuse",
-        "Hate",
-        "Admin disrespect",
-        "Other"
+        "Реклама",
+        "Спам",
+        "Злоупотребление камерой наблюдателя",
+        "Разжигание ненависти",
+        "Неуважение к администрации",
+        "Другая причина"
     ];
 
     [JsonPropertyName("AdminFlags")]
@@ -280,6 +280,9 @@ public class CS2_SimpleAdminConfig : BasePluginConfig
  
     [JsonPropertyName("OtherSettings")]
     public OtherSettings OtherSettings { get; set; } = new();
+
+    [JsonPropertyName("ServerChatExport")]
+    public Infrastructure.ServerChatExportConfig ServerChatExport { get; set; } = new();
 
     [JsonPropertyName("EnableMetrics")]
     public bool EnableMetrics { get; set; } = true;

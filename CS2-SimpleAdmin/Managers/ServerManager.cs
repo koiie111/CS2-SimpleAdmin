@@ -71,7 +71,7 @@ public class ServerManager
             var rconPasswordConVar = ConVar.Find("rcon_password");
 
             var address = $"{ipAddress}:{hostportConVar?.GetPrimitiveValue<int>()}";
-            var hostname = hostnameConVar?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Unknown";
+            var hostname = hostnameConVar?.StringValue ?? CS2_SimpleAdmin._localizer?["sa_unknown"] ?? "Неизвестно";
             var rconPassword = rconPasswordConVar?.StringValue ?? "";
             CS2_SimpleAdmin.IpAddress = address;
 

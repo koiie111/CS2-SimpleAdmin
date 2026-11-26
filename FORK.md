@@ -102,3 +102,11 @@ git fetch upstream
 git merge upstream/main
 ```
 Если при мерже вернулся respawn, проверьте `Modules/CS2-SimpleAdmin_FunCommands`.
+
+## Server chat export
+
+Enable `ServerChatExport` in the plugin config with `Endpoint`, `ServerId` and `ApiKey`. Use the website's server ID and the corresponding 64-character lowercase hex key. The endpoint is HTTPS, with HTTP allowed for loopback tests.
+
+The existing global CounterStrikeSharp `Pre` command listener snapshots accepted `say` and `say_team` input before named listeners such as the chat tag formatter. It puts records into a bounded queue without waiting. A single background worker persists and uploads batches of up to 64 records. HTTP 200 with an explicit JSON acknowledgement acknowledges a batch. A retry reuses the original event IDs. The disk outbox is under `data/server-chat/<server-id>` and capped at 64 MiB. The in-memory queue is capped at 8192 entries. Log warnings count drops when capacity runs out.
+
+A transient filesystem error retries in the background. If the receiver rejects a particular batch with HTTP 413 or 422, its file stays in the outbox and retries after five minutes while newer batches continue. Other delivery failures back off for the endpoint. Keep the data directory when replacing the plugin.

@@ -35,7 +35,7 @@ public partial class CS2_SimpleAdmin
         {
             if (_localizer != null)
                 player.PrintToChat(_localizer["sa_adminchat_template_admin",
-                    caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName,
+                    caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName,
                     utf8String]);
         }
     }
@@ -106,7 +106,7 @@ public partial class CS2_SimpleAdmin
         // A gagged / silenced / unverified player never delivers text to others, whatever alias this command is registered under
         if (!ChatGuard.MayPublish(caller)) return;
 
-        var callerName = caller == null ? _localizer?["sa_console"] ?? "Console" : caller.PlayerName;
+        var callerName = caller == null ? _localizer?["sa_console"] ?? "Консоль" : caller.PlayerName;
 
         var targets = GetTarget(command);
         if (targets == null) return;
@@ -125,7 +125,7 @@ public partial class CS2_SimpleAdmin
             player.PrintToChat($"({callerName}) {utf8String}".ReplaceColorTags());
         });
 
-        command.ReplyToCommand($" Private message sent!");
+        command.ReplyToCommand($" Личное сообщение отправлено.");
     }
 
     /// <summary>

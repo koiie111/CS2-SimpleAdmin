@@ -430,7 +430,10 @@ public partial class CS2_SimpleAdmin
                     player.SendLocalizedMessage(_localizer, "sa_player_penalty_chat_active", endDateTime.Value.ToString("g", player.GetLanguage()));
                 return HookResult.Stop;
             case ChatVerdict.BlockUnverified:
-                player.PrintToChat("[CS2-SimpleAdmin] Chat is unavailable until your penalties are verified.");
+                var pendingMessage = _localizer?["sa_player_penalty_check_pending"];
+                player.PrintToChat(pendingMessage is { ResourceNotFound: false }
+                    ? pendingMessage.Value
+                    : "Чат станет доступен после проверки ваших наказаний.");
                 return HookResult.Stop;
             case ChatVerdict.RunCommand:
                 // The line is dropped before the engine's chat handler (which would publish it and dispatch the command); the
@@ -439,7 +442,11 @@ public partial class CS2_SimpleAdmin
                 return HookResult.Stop;
         }
 
-        if (text.Length == 0 || text[0] != '@') return HookResult.Continue;
+        if (text.Length == 0 || text[0] != '@')
+        {
+            CaptureServerChat(player, info, command, text);
+            return HookResult.Continue;
+        }
 
         if (command.Equals("say", StringComparison.OrdinalIgnoreCase) &&
             AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))
@@ -448,7 +455,11 @@ public partial class CS2_SimpleAdmin
             return HookResult.Stop;
         }
 
-        if (!command.Equals("say_team", StringComparison.OrdinalIgnoreCase)) return HookResult.Continue;
+        if (!command.Equals("say_team", StringComparison.OrdinalIgnoreCase))
+        {
+            CaptureServerChat(player, info, command, text);
+            return HookResult.Continue;
+        }
 
         StringBuilder sb = new();
         if (AdminManager.PlayerHasPermissions(new SteamID(player.SteamID), "@css/chat"))
@@ -470,6 +481,33 @@ public partial class CS2_SimpleAdmin
         }
 
         return HookResult.Stop;
+    }
+
+    // The global Pre listener runs before named say listeners, including the chat tag formatter.
+    // Snapshot the accepted player line once, after SimpleAdmin's gag and private admin chat checks.
+    private void CaptureServerChat(CCSPlayerController player, CommandInfo info, string command, string firstArgument)
+    {
+        const ulong firstIndividualSteamId = 76561197960265728UL;
+        var export = _chatExport;
+        if (export is null || !ChatGate.IsSayCommand(command) || player.IsHLTV
+            || info.CallingContext == CommandCallingContext.Chat)
+            return;
+
+        var text = info.ArgCount > 2 ? info.ArgString : firstArgument;
+        if (string.IsNullOrWhiteSpace(text) || ChatTriggers.StartsWithTrigger(firstArgument))
+            return;
+
+        var steamId = player.SteamID;
+        if (steamId <= firstIndividualSteamId)
+            return;
+
+        var team = command.Equals("say", StringComparison.OrdinalIgnoreCase) ? "" : player.TeamNum switch
+        {
+            2 => "T",
+            3 => "CT",
+            _ => "OBS"
+        };
+        export.Capture(steamId, player.PlayerName, team, text);
     }
 
     /*public HookResult OnCommandSay(CCSPlayerController? player, CommandInfo info)

@@ -169,7 +169,7 @@ public partial class CS2_SimpleAdmin
         if (!EnsureDatabaseReady(command, scope))
         {
             if (command == null)
-                caller.Notify("[CS2-SimpleAdmin] Database not ready - the action was NOT saved. Try again in a moment.");
+                caller.Notify("[CS2-SimpleAdmin] База данных ещё подключается. Действие не сохранено. Попробуйте чуть позже.");
             return false;
         }
 
@@ -177,8 +177,8 @@ public partial class CS2_SimpleAdmin
         var serverId = GlobalServerId;
         if (scope == OperationScope.Server && serverId == null)
         {
-            if (command != null) command.ReplyToCommand("[CS2-SimpleAdmin] Plugin is still starting (server id not resolved), try again in a moment.");
-            else caller.Notify("[CS2-SimpleAdmin] Server not registered yet - the action was NOT saved. Try again in a moment.");
+            if (command != null) command.ReplyToCommand("[CS2-SimpleAdmin] Плагин ещё запускается. Попробуйте чуть позже.");
+            else caller.Notify("[CS2-SimpleAdmin] Сервер ещё регистрируется. Действие не сохранено. Попробуйте чуть позже.");
             return false;
         }
 
@@ -188,7 +188,7 @@ public partial class CS2_SimpleAdmin
                 : Runtime.TryQueueDb(operation, work, context))
             return true;
 
-        const string message = "[CS2-SimpleAdmin] Database queue is full or unavailable - the action was NOT saved. Try again.";
+        const string message = "[CS2-SimpleAdmin] База данных занята. Действие не сохранено. Попробуйте ещё раз.";
         if (command != null)
             command.ReplyToCommand(message);
         else
@@ -207,7 +207,7 @@ public partial class CS2_SimpleAdmin
     {
         var caller = WorkContext.Current?.Caller ?? CallerRef.Console;
         return Runtime.OnGameThread(() =>
-            caller.Notify($"[CS2-SimpleAdmin] {what} could NOT be saved to the database (see server log)."));
+            caller.Notify($"[CS2-SimpleAdmin] Не удалось сохранить действие «{what}». Подробности в журнале сервера."));
     }
 
     /// <summary>
@@ -219,7 +219,7 @@ public partial class CS2_SimpleAdmin
 
     internal static CS2_SimpleAdminApi.PlayerInfo CreatePlayerInfoSnapshot(CCSPlayerController player) =>
         new(player.UserId, player.Slot, new CounterStrikeSharp.API.Modules.Entities.SteamID(player.SteamID),
-            string.IsNullOrEmpty(player.PlayerName) ? _localizer?["sa_unknown"] ?? "Unknown" : player.PlayerName,
+            string.IsNullOrEmpty(player.PlayerName) ? _localizer?["sa_unknown"] ?? "Неизвестно" : player.PlayerName,
             player.IpAddress?.Split(':')[0]);
 
     // ---------------------------------------------------------------- admins reload (coalesced)
