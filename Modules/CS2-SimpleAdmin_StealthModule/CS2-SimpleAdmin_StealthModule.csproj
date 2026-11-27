@@ -13,6 +13,11 @@
     </ItemGroup>
 
     <ItemGroup>
+      <InternalsVisibleTo Include="CS2-SimpleAdmin.Tests" />
+      <InternalsVisibleTo Include="CS2-SimpleAdmin.Bench" />
+    </ItemGroup>
+
+    <ItemGroup>
       <Reference Include="CS2-SimpleAdminApi">
         <HintPath>CS2-SimpleAdminApi.dll</HintPath>
       </Reference>

@@ -11,6 +11,12 @@ using CS2_SimpleAdminApi;
 // Synthetic micro/meso benchmarks: same machine, same data, original algorithm (copied from f544af7) vs new.
 // They measure CPU/allocation of the plugin's own code paths, NOT CS2 frame time (see report).
 
+if (args.Contains("--stealth-only"))
+{
+    StealthBench.Run(Console.WriteLine);
+    return;
+}
+
 var quick = args.Contains("--quick");
 var sb = new StringBuilder();
 void Line(string s = "") { Console.WriteLine(s); sb.AppendLine(s); }
@@ -194,47 +200,7 @@ foreach (var p in new[] { 0, 16, 32, 64 })
 Line();
 
 // ---------------------------------------------------------------- H: stealth transmit (managed part only)
-Line("## H. Stealth CheckTransmit, managed part (one silent admin)");
-Line();
-Line("| tracked players = recipients | old µs/call | old B/call | new µs/call | new B/call |");
-Line("|---:|---:|---:|---:|---:|");
-foreach (var p in new[] { 16, 32, 64 })
-{
-    var players = Enumerable.Range(0, p).Select(k => new FakePlayer(k, 100 + k)).ToList();
-    // One transmit bit vector per recipient, as CheckTransmit gets one CCheckTransmitInfo per client; all observer
-    // pawns start as "transmitted" (worst case: everything has to be cleared)
-    var vectors = Enumerable.Range(0, p).Select(_ => new uint[512]).ToArray();
-    void Fill() { foreach (var v in vectors) Array.Fill(v, uint.MaxValue); }
-    var oldH = Measure.Op(() =>
-    {
-        Fill();
-        var valid = players.Select(x => new { x.Slot, ObserverPawn = x.Observer }).Where(x => x.ObserverPawn >= 0).ToArray();
-        foreach (var recipient in players)
-        foreach (var target in valid)
-        {
-            if (target.Slot == recipient.Slot) continue;
-            var bits = vectors[recipient.Slot];
-            if (Bits.Contains(bits, target.ObserverPawn)) Bits.Remove(bits, target.ObserverPawn);
-        }
-    }, 20_000);
-    var indices = players.Select(x => x.Observer).ToArray();
-    var owners = players.Select(x => x.Slot).ToArray();
-    var newH = Measure.Op(() =>
-    {
-        Fill();
-        for (var r = 0; r < players.Count; r++)
-        {
-            var bits = vectors[r];
-            for (var j = 0; j < indices.Length; j++)
-                if (owners[j] != r) Bits.Remove(bits, indices[j]);
-        }
-    }, 20_000);
-    var fillOnly = Measure.Op(Fill, 20_000);
-    Line($"| {p} | {oldH.P50 - fillOnly.P50:F2} | {oldH.BytesPerOp:N0} | {newH.P50 - fillOnly.P50:F2} | {newH.BytesPerOp:N0} |");
-}
-
-Line();
-Line("Not included: the old code also resolved every player's ObserverPawn handle (native) on every call and created a controller wrapper per recipient; the new code resolves pawns only after connect/team/spawn/round events (or once per second) and reads the recipient slot directly.");
+StealthBench.Run(Line);
 
 // ---------------------------------------------------------------- J: costs added by the review fixes (R1-R9)
 Line();
@@ -434,14 +400,6 @@ if (outPath != null) File.WriteAllText(outPath, sb.ToString());
 return;
 
 static string RuntimeInformationText() => System.Runtime.InteropServices.RuntimeInformation.OSDescription;
-
-internal sealed record FakePlayer(int Slot, int Observer);
-
-internal static class Bits
-{
-    public static bool Contains(uint[] v, int bit) => (v[bit >> 5] & (1u << (bit & 31))) != 0;
-    public static void Remove(uint[] v, int bit) => v[bit >> 5] &= ~(1u << (bit & 31));
-}
 
 internal static class Data
 {

@@ -9,6 +9,7 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../../Modules/CS2-SimpleAdmin_StealthModule/CS2-SimpleAdmin_StealthModule.csproj" />
     <ProjectReference Include="..\..\CS2-SimpleAdmin\CS2-SimpleAdmin.csproj" />
   </ItemGroup>
 
