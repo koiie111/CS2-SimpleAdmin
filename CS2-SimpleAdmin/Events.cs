@@ -41,6 +41,7 @@ public partial class CS2_SimpleAdmin
     private void RegisterEvents()
     {
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
+        RegisterListener<Listeners.OnMapEnd>(ResetHideTransitions);
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         RegisterListener<Listeners.OnClientConnected>(OnClientConnected);
@@ -59,6 +60,7 @@ public partial class CS2_SimpleAdmin
     private void UnregisterEvents()
     {
         RemoveListener<Listeners.OnMapStart>(OnMapStart);
+        RemoveListener<Listeners.OnMapEnd>(ResetHideTransitions);
         RemoveListener<Listeners.OnClientConnect>(OnClientConnect);
         RemoveListener<Listeners.OnClientConnected>(OnClientConnected);
         RemoveListener<Listeners.OnClientDisconnectPost>(ClearDisconnectedSilentSlot);

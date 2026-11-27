@@ -20,6 +20,7 @@ using CounterStrikeSharp.API.ValveConstants.Protobuf;
 using CS2_SimpleAdmin.Models;
 using MenuManager;
 using System.Diagnostics.CodeAnalysis;
+using TimerFlags = CounterStrikeSharp.API.Modules.Timers.TimerFlags;
 
 namespace CS2_SimpleAdmin;
 
@@ -621,18 +622,68 @@ public partial class CS2_SimpleAdmin
         else
         {
             PublishSilentSnapshot();
-            Server.ExecuteCommand("sv_disable_teamselect_menu 1");
+            HoldTeamSelectMenu();
 
             if (caller.PlayerPawn?.Value?.LifeState == (int)LifeState_t.LIFE_ALIVE)
                 caller.PlayerPawn.Value?.CommitSuicide(true, false);
 
             caller.PrintToChat($"Вы скрыты от игроков.");
-            if (caller.TeamNum > 1)
-                AddTimer(0.15f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.Spectator); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
-            AddTimer(0.26f, () => { if (caller.IsValid) caller.ChangeTeam(CsTeam.None); }, CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
-            AddTimer(0.50f, () => Server.ExecuteCommand("sv_disable_teamselect_menu 0"), CounterStrikeSharp.API.Modules.Timers.TimerFlags.STOP_ON_MAPCHANGE);
+            ScheduleSilentTeamChanges(caller);
             SimpleAdminApi?.OnAdminToggleSilentEvent(caller.Slot, true);
         }
+    }
+
+    private readonly Dictionary<int, object> _pendingHideMoves = [];
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _teamMenuTimer;
+
+    private void ScheduleSilentTeamChanges(CCSPlayerController player)
+    {
+        var slot = player.Slot;
+        var activation = new object();
+        _pendingHideMoves[slot] = activation;
+
+        if (player.TeamNum > 1)
+            AddTimer(0.15f, () =>
+            {
+                if (_pendingHideMoves.GetValueOrDefault(slot) == activation && SilentPlayers.Contains(slot) && player.IsValid)
+                    player.ChangeTeam(CsTeam.Spectator);
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+
+        AddTimer(0.26f, () =>
+        {
+            if (_pendingHideMoves.GetValueOrDefault(slot) != activation) return;
+            _pendingHideMoves.Remove(slot);
+            if (SilentPlayers.Contains(slot) && player.IsValid) player.ChangeTeam(CsTeam.None);
+        }, TimerFlags.STOP_ON_MAPCHANGE);
+    }
+
+    private void HoldTeamSelectMenu()
+    {
+        if (_teamMenuTimer != null)
+            _teamMenuTimer.Kill();
+        else
+        {
+            var menu = ConVar.Find("sv_disable_teamselect_menu");
+            if (menu == null || menu.GetPrimitiveValue<bool>()) return;
+            menu.SetValue(true);
+        }
+
+        // Overlapping hides share the global cvar until the last transition finishes.
+        _teamMenuTimer = AddTimer(0.50f, RestoreTeamSelectMenu);
+    }
+
+    private void RestoreTeamSelectMenu()
+    {
+        _teamMenuTimer = null;
+        ConVar.Find("sv_disable_teamselect_menu")?.SetValue(false);
+    }
+
+    private void ResetHideTransitions()
+    {
+        _pendingHideMoves.Clear();
+        if (_teamMenuTimer == null) return;
+        _teamMenuTimer.Kill();
+        RestoreTeamSelectMenu();
     }
 
     /// <summary>

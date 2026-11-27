@@ -328,6 +328,7 @@ public partial class CS2_SimpleAdmin : BasePlugin, IPluginConfig<CS2_SimpleAdmin
         PlayersTimer = null;
         PlayerPenaltyManager.RemoveAllPenalties();
         
+        ResetHideTransitions();
         UnregisterEvents();
         
         if (hotReload)
