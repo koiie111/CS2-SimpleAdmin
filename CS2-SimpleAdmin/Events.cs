@@ -44,6 +44,7 @@ public partial class CS2_SimpleAdmin
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         // RegisterListener<Listeners.OnClientConnect>(OnClientConnect);
         RegisterListener<Listeners.OnClientConnected>(OnClientConnected);
+        RegisterListener<Listeners.OnClientDisconnectPost>(ClearDisconnectedSilentSlot);
         RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
         RegisterListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
         if (Config.OtherSettings.UserMessageGagChatType)
@@ -60,6 +61,7 @@ public partial class CS2_SimpleAdmin
         RemoveListener<Listeners.OnMapStart>(OnMapStart);
         RemoveListener<Listeners.OnClientConnect>(OnClientConnect);
         RemoveListener<Listeners.OnClientConnected>(OnClientConnected);
+        RemoveListener<Listeners.OnClientDisconnectPost>(ClearDisconnectedSilentSlot);
         RemoveListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
         RemoveListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
         if (Config.OtherSettings.UserMessageGagChatType)
@@ -108,6 +110,13 @@ public partial class CS2_SimpleAdmin
         if (!ServerLoaded) _serverLoading = false;
     }
 
+    // The native disconnect still has the slot when player_disconnect has lost its controller.
+    internal static void ClearDisconnectedSilentSlot(int slot)
+    {
+        if (SilentPlayers.Remove(slot))
+            PublishSilentSnapshot();
+    }
+
     [GameEventHandler]
     public HookResult OnClientDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
@@ -125,8 +134,7 @@ public partial class CS2_SimpleAdmin
         
         CachedPlayers.Remove(player);
         BotPlayers.Remove(player);
-        if (SilentPlayers.Remove(player.Slot))
-            PublishSilentSnapshot();
+        ClearDisconnectedSilentSlot(player.Slot);
         // Every background result for this connection becomes stale from here on
         Runtime.Sessions.End(player.Slot);
 

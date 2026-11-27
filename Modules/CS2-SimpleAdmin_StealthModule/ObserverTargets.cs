@@ -5,6 +5,10 @@ namespace CS2_SimpleAdmin_StealthModule;
 /// <summary>Game-thread cache. The dense prefix contains at most one observer target per owner.</summary>
 internal sealed class ObserverTargets
 {
+    // Source 2's transmit vector has 14 index bits. Older CSS releases report the
+    // larger server entity limit here and their bit-vector writer trusts it.
+    internal static int NetworkEdictLimit(int cssMaxEdicts) => Math.Min(cssMaxEdicts, 1 << 14);
+
     internal const int MaxSlots = 128;
     private readonly int[] _indices = new int[MaxSlots];
     private readonly int[] _owners = new int[MaxSlots];

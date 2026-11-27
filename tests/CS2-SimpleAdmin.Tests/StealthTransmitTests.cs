@@ -55,6 +55,63 @@ public sealed class StealthTransmitTests
         Assert.False(StealthPlugin.IsIndexerRecipient(false, false));
     }
 
+    [Theory]
+    [InlineData(32768, 16384)] // old CSS uses the server entity limit
+    [InlineData(16384, 16384)]
+    [InlineData(8192, 8192)]
+    public void CapsIndicesAtTheNetworkVectorSize(int cssLimit, int expected) =>
+        Assert.Equal(expected, ObserverTargets.NetworkEdictLimit(cssLimit));
+
+    [Fact]
+    public void NativeAdapterOnlyChangesForeignBitsOfTrackedRecipients()
+    {
+        const int slotOffset = 32;
+        unsafe
+        {
+            var targets = new ObserverTargets();
+            targets.Set(0, 31, 31);
+            targets.Set(1, 32, 32);
+            bool[] recipients = [true, true, false];
+            int[] slots = [0, 1, 2, -1, 128];
+            var words = stackalloc uint[slots.Length * 2];
+            var records = stackalloc byte[slots.Length * 64];
+            var entries = stackalloc nint[slots.Length + 1];
+            for (var i = 0; i < slots.Length; i++)
+            {
+                words[i * 2] = words[i * 2 + 1] = uint.MaxValue;
+                var record = records + i * 64;
+                *(nint*)record = (nint)(words + i * 2);
+                *(int*)(record + slotOffset) = slots[i];
+                entries[i] = (nint)record;
+            }
+
+            entries[slots.Length] = 0;
+            nint* list = stackalloc nint[] { (nint)entries, slots.Length + 1 };
+            StealthPlugin.ApplyNative((nint)list, slotOffset, recipients, targets);
+            for (var i = 0; i < slots.Length; i++)
+            {
+                Assert.Equal(i == 1 ? 0x7fffffffu : uint.MaxValue, words[i * 2]);
+                Assert.Equal(i == 0 ? 0xfffffffeu : uint.MaxValue, words[i * 2 + 1]);
+            }
+        }
+    }
+
+    [Fact]
+    public void DisconnectWithoutControllerPublishesRemovalOnce()
+    {
+        const int slot = 11;
+        CS2_SimpleAdmin.SilentPlayers.Add(slot);
+        CS2_SimpleAdmin.PublishSilentSnapshot();
+        var before = CS2_SimpleAdmin.SilentSnapshot;
+        CS2_SimpleAdmin.ClearDisconnectedSilentSlot(slot);
+        var after = CS2_SimpleAdmin.SilentSnapshot;
+        Assert.Contains(slot, before);
+        Assert.DoesNotContain(slot, after);
+        Assert.DoesNotContain(slot, CS2_SimpleAdmin.SilentPlayers);
+        CS2_SimpleAdmin.ClearDisconnectedSilentSlot(slot);
+        Assert.Same(after, CS2_SimpleAdmin.SilentSnapshot);
+    }
+
     [Fact]
     public void ClearsExactlyTheBaselineBitsAndNeverAddsBits()
     {

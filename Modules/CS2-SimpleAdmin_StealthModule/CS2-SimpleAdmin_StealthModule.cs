@@ -7,7 +7,6 @@ using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Timers;
-using CounterStrikeSharp.API.Modules.Utils;
 using CS2_SimpleAdminApi;
 using Microsoft.Extensions.Logging;
 
@@ -34,7 +33,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
     private readonly HashSet<int> _statusExclusions = [];
     private readonly uint[] _controllerHandles = new uint[MaxSlots];
     private readonly uint[] _deletedPawns = new uint[MaxSlots];
-    private readonly int[] _connectionGenerations = new int[MaxSlots];
+    private readonly int[] _joinGenerations = new int[MaxSlots];
     private readonly bool[] _recipients = new bool[MaxSlots];
     private readonly bool[] _dirty = new bool[MaxSlots];
     private readonly int[] _dirtySlots = new int[MaxSlots];
@@ -78,8 +77,9 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
                 throw new InvalidOperationException("CheckTransmitPlayerSlot is negative.");
 
             // Read the runtime constant. The value inlined by the 1.0.340 compiler target differs on newer CSS.
-            _maxEdicts = (int)(typeof(Utilities).GetField(nameof(Utilities.MaxEdicts))?.GetRawConstantValue()
-                ?? throw new InvalidOperationException("CSS MaxEdicts is unavailable."));
+            var cssLimit = typeof(Utilities).GetField(nameof(Utilities.MaxEdicts))?.GetRawConstantValue();
+            _maxEdicts = ObserverTargets.NetworkEdictLimit(cssLimit is int limit ? limit :
+                throw new InvalidOperationException("CSS MaxEdicts is unavailable."));
             // The native adapter mirrors the x64 CSS layout. On other architectures let CSS decode its own list.
             _useCssIndexer = IntPtr.Size != 8;
         }
@@ -125,15 +125,15 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         }
 
         ReadSilentSlots();
-        foreach (var slot in _silentSlots)
-            SetStatusExclusion(slot, true);
         SyncTransmit();
     }
 
     public void OnConfigParsed(PluginConfig config)
     {
         Config = config;
-        _permissions = config.Permissions.Select(permission => new[] { permission }).ToArray();
+        _permissions = config.Permissions?.Where(permission => !string.IsNullOrWhiteSpace(permission))
+            .Select(permission => new[] { permission }).ToArray() ?? [];
+        if (_loaded) SyncStatusExclusions();
     }
 
     public override void Unload(bool hotReload)
@@ -194,6 +194,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         foreach (var slot in snapshot)
             if (!_disconnectedSilentSlots.Contains(slot))
                 _silentSlots.Add(slot);
+        SyncStatusExclusions();
     }
 
     private void QueueSilentReconciliation()
@@ -212,16 +213,23 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
 
     private void OnAdminToggleSilent(int slot, bool status)
     {
-        if (!_loaded || _mapEnding) return;
+        if (!_loaded || _mapEnding || (uint)slot >= MaxSlots) return;
+        // A manual toggle (including hide followed by unhide) supersedes pending auto-hide.
+        _joinGenerations[slot]++;
         _disconnectedSilentSlots.Remove(slot);
         ReadSilentSlots();
-        SetStatusExclusion(slot, status);
         SyncTransmit();
+    }
+
+    private void SyncStatusExclusions()
+    {
+        for (var slot = 0; slot < MaxSlots; slot++)
+            SetStatusExclusion(slot, Config.BlockStatusCommand && _silentSlots.Contains(slot));
     }
 
     private void SetStatusExclusion(int slot, bool status)
     {
-        if (!Config.BlockStatusCommand || (uint)slot >= MaxSlots) return;
+        if ((uint)slot >= MaxSlots) return;
         if (status ? _statusExclusions.Add(slot) : _statusExclusions.Remove(slot))
             Server.ExecuteCommand(status ? $"mm_excludeslot {slot}" : $"mm_removeexcludeslot {slot}");
     }
@@ -265,7 +273,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         {
             if (_controllerHandles[slot] == InvalidHandle) _playerCount++;
             _controllerHandles[slot] = handle;
-            _connectionGenerations[slot]++;
+            _joinGenerations[slot]++;
             _deletedPawns[slot] = InvalidHandle;
             _targets.Remove(slot);
         }
@@ -280,7 +288,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         _controllerHandles[slot] = InvalidHandle;
         _recipients[slot] = false;
         _deletedPawns[slot] = InvalidHandle;
-        _connectionGenerations[slot]++;
+        _joinGenerations[slot]++;
         _playerCount--;
         _targets.Remove(slot);
         return true;
@@ -369,7 +377,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         if (_useCssIndexer)
             ApplyUsingCssIndexer(infolist);
         else
-            ApplyNative(infolist);
+            ApplyNative(infolist.Handle, _slotOffset, _recipients, _targets);
     }
 
     internal static bool IsNativeRecipient(bool[] recipients, int slot) =>
@@ -390,10 +398,10 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         }
     }
 
-    private unsafe void ApplyNative(CCheckTransmitInfoList infolist)
+    internal static unsafe void ApplyNative(nint list, int slotOffset, bool[] recipients, ObserverTargets targets)
     {
         // CSS x64 list layout: [CCheckTransmitInfo**, count]. Borrowed pointers are valid only in this callback.
-        var inner = (nint*)infolist.Handle;
+        var inner = (nint*)list;
         if (inner == null) return;
         var count = (int)inner[1];
         var infos = (nint*)inner[0];
@@ -402,9 +410,9 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         {
             var info = (byte*)infos[i];
             if (info == null) continue;
-            var slot = *(int*)(info + _slotOffset);
-            if (IsNativeRecipient(_recipients, slot))
-                _targets.Hide(((CCheckTransmitInfo*)info)->TransmitEntities, slot);
+            var slot = *(int*)(info + slotOffset);
+            if (IsNativeRecipient(recipients, slot))
+                targets.Hide(((CCheckTransmitInfo*)info)->TransmitEntities, slot);
         }
     }
 
@@ -447,24 +455,23 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         Track(player);
         SyncTransmit();
 
-        if (!Config.HideAdminsOnJoin || !HasConfiguredPermission(player))
+        if (!Config.HideAdminsOnJoin)
             return HookResult.Continue;
 
         var map = _mapGeneration;
-        var connection = _connectionGenerations[slot];
-        AddTimer(0.75f, () => ResolveJoinPlayer(slot, map, connection)?.ChangeTeam(CsTeam.Spectator),
-            TimerFlags.STOP_ON_MAPCHANGE);
-        AddTimer(1.25f, () => ResolveJoinPlayer(slot, map, connection)?.ExecuteClientCommandFromServer("css_hide"),
+        var generation = _joinGenerations[slot];
+        // css_hide checks command permissions/overrides and performs the team transition itself.
+        AddTimer(1.25f, () => ResolveJoinPlayer(slot, map, generation)?.ExecuteClientCommandFromServer("css_hide"),
             TimerFlags.STOP_ON_MAPCHANGE);
         return HookResult.Continue;
     }
 
-    private CCSPlayerController? ResolveJoinPlayer(int slot, int map, int connection)
+    private CCSPlayerController? ResolveJoinPlayer(int slot, int map, int generation)
     {
-        if (!_loaded || _mapGeneration != map || _connectionGenerations[slot] != connection ||
+        if (!_loaded || !Config.HideAdminsOnJoin || _mapGeneration != map || _joinGenerations[slot] != generation ||
             _sharedApi is not { } api || ResolvePlayer(slot) is not { } player || api.IsAdminSilent(player))
             return null;
-        return player;
+        return HasConfiguredPermission(player) ? player : null;
     }
 
     [GameEventHandler(HookMode.Pre)]
@@ -488,8 +495,9 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
     private void OnClientDisconnectPost(int slot)
     {
         // Some disconnect events have no usable controller. The native callback still carries the slot.
-        if ((uint)slot < MaxSlots && _controllerHandles[slot] != InvalidHandle &&
-            Untrack(slot, _controllerHandles[slot]))
+        if ((uint)slot >= MaxSlots) return;
+        var handle = _controllerHandles[slot];
+        if ((handle != InvalidHandle && Untrack(slot, handle)) || _silentSlots.Contains(slot))
             FinishDisconnect(slot);
     }
 
@@ -498,7 +506,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
         SetStatusExclusion(slot, false);
         if (_silentSlots.Remove(slot))
         {
-            // The core handles player_disconnect in Post and can miss it if the controller is already gone.
+            // Older cores can retain this slot if player_disconnect has no controller.
             _disconnectedSilentSlots.Add(slot);
             QueueSilentReconciliation();
         }
