@@ -413,7 +413,8 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
     {
         var player = @event.Userid;
         if (player is not { IsValid: true } || player.IsBot) return HookResult.Continue;
-        MarkDirty(player.Slot);
+        if (_subscription.Active)
+            MarkDirty(player.Slot);
         if (ShouldSuppressBroadcast(player))
             info.DontBroadcast = true;
         return HookResult.Continue;
@@ -509,7 +510,8 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
     {
         var player = @event.Userid;
         if (player is not { IsValid: true } || player.IsBot) return HookResult.Continue;
-        MarkDirty(player.Slot);
+        if (_subscription.Active)
+            MarkDirty(player.Slot);
         if (ShouldSuppressBroadcast(player, checkTeam: true))
             info.DontBroadcast = true;
         return HookResult.Continue;
