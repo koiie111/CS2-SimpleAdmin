@@ -4,7 +4,6 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Admin;
-using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Timers;
 using CS2_SimpleAdminApi;
@@ -531,8 +530,7 @@ public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginCon
 
     private bool HasConfiguredPermission(CCSPlayerController player)
     {
-        if (_permissions.Length == 0) return false;
-        var steamId = new SteamID(player.SteamID);
+        if (_permissions.Length == 0 || player.AuthorizedSteamID is not { } steamId) return false;
         foreach (var flags in _permissions)
             if (AdminManager.PlayerHasPermissions(steamId, flags))
                 return true;
