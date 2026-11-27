@@ -24,7 +24,7 @@ public static class Extensions
 
     public static List<CCSPlayerController> GetSpectators(this CCSPlayerController player)
     {
-        return CS2_SimpleAdmin_StealthModule.Players
+        return CS2_SimpleAdmin_StealthModule.GetTrackedPlayers()
             .Where(p => p.GetSpectatingPlayer()?.Slot == player.Slot)
             .ToList();
     }

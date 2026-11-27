@@ -1,225 +1,445 @@
+using System.Diagnostics;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Admin;
-using CounterStrikeSharp.API.Modules.Entities;
+using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Timers;
-using CounterStrikeSharp.API.Modules.Utils;
 using CS2_SimpleAdminApi;
 using Microsoft.Extensions.Logging;
 
 namespace CS2_SimpleAdmin_StealthModule;
 
-public class CS2_SimpleAdmin_StealthModule: BasePlugin, IPluginConfig<PluginConfig>
+public class CS2_SimpleAdmin_StealthModule : BasePlugin, IPluginConfig<PluginConfig>
 {
     public override string ModuleName => "[CS2-SimpleAdmin] Stealth Module";
-    public override string ModuleVersion => "v1.0.3";
+    public override string ModuleVersion => "v1.0.4";
     public override string ModuleAuthor => "daffyy";
 
-    private static ICS2_SimpleAdminApi? _sharedApi;
-    private readonly PluginCapability<ICS2_SimpleAdminApi> _pluginCapability  = new("simpleadmin:api");
-    private bool _subscribedToggleSilent;
+    private const int MaxSlots = ObserverTargets.MaxSlots;
+    private const uint InvalidHandle = uint.MaxValue;
+    private static CS2_SimpleAdmin_StealthModule? _instance;
 
-    internal static readonly HashSet<CCSPlayerController> Players = [];
-
-    // Compact view of Players for CheckTransmit, rebuilt on the game thread only when marked dirty
-    // (connect/disconnect/team/spawn/round, plus a 1 s safety refresh). CheckTransmit itself only reads arrays.
-    private const int MaxSlots = 128;
-    private int[] _observerIndices = [];
-    private int[] _observerOwnerSlots = [];
-    private readonly bool[] _isTrackedRecipient = new bool[MaxSlots];
-    private bool _indicesDirty = true;
+    private readonly PluginCapability<ICS2_SimpleAdminApi> _pluginCapability = new("simpleadmin:api");
+    private ICS2_SimpleAdminApi? _sharedApi;
+    private readonly TransmitSubscription _subscription;
+    private readonly Listeners.CheckTransmit _checkTransmit;
+    private readonly Listeners.OnEntityDeleted _entityDeleted;
+    private readonly ObserverTargets _targets = new();
+    private readonly HashSet<int> _silentSlots = [];
+    private readonly HashSet<int> _disconnectedSilentSlots = [];
+    private readonly HashSet<int> _statusExclusions = [];
+    private readonly uint[] _controllerHandles = new uint[MaxSlots];
+    private readonly uint[] _deletedPawns = new uint[MaxSlots];
+    private readonly int[] _joinGenerations = new int[MaxSlots];
+    private readonly bool[] _recipients = new bool[MaxSlots];
+    private readonly bool[] _dirty = new bool[MaxSlots];
+    private readonly int[] _dirtySlots = new int[MaxSlots];
+    private int _dirtyCount;
+    private int _playerCount;
+    private int _mapGeneration;
+    private bool _mapEnding;
+    private bool _loaded;
+    private bool _reconcileQueued;
+    private bool _refreshAll;
+    private long _nextRefresh;
     private int _slotOffset = -1;
+    private int _maxEdicts;
+    private bool _useCssIndexer;
+    private string[][] _permissions = [];
 
     public PluginConfig Config { get; set; } = new();
 
+    public CS2_SimpleAdmin_StealthModule()
+    {
+        _checkTransmit = OnCheckTransmit;
+        _entityDeleted = OnEntityDeleted;
+        _subscription = new TransmitSubscription(SubscribeTransmit, UnsubscribeTransmit);
+        ClearPlayers();
+        OnConfigParsed(Config);
+    }
+
     public override void Load(bool hotReload)
     {
-        RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        _loaded = true;
+        _mapEnding = false;
+        _instance = this;
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
+        RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
+        RegisterListener<Listeners.OnClientDisconnectPost>(OnClientDisconnectPost);
 
         try
         {
-            // Same gamedata offset CounterStrikeSharp's CCheckTransmitInfoList uses to find the recipient's slot
             _slotOffset = GameData.GetOffset("CheckTransmitPlayerSlot");
+            if (_slotOffset < 0)
+                throw new InvalidOperationException("CheckTransmitPlayerSlot is negative.");
+
+            // Read the runtime constant. The value inlined by the 1.0.340 compiler target differs on newer CSS.
+            var cssLimit = typeof(Utilities).GetField(nameof(Utilities.MaxEdicts))?.GetRawConstantValue();
+            _maxEdicts = ObserverTargets.NetworkEdictLimit(cssLimit is int limit ? limit :
+                throw new InvalidOperationException("CSS MaxEdicts is unavailable."));
+            // The native adapter mirrors the x64 CSS layout. On other architectures let CSS decode its own list.
+            _useCssIndexer = IntPtr.Size != 8;
         }
         catch (Exception ex)
         {
-            Logger.LogWarning("CheckTransmitPlayerSlot offset unavailable, using the slower indexer: {Error}", ex.Message);
+            _slotOffset = -1;
+            Logger.LogWarning("Stealth transmit filtering disabled: {Error}", ex.Message);
         }
+    }
 
-        // Safety net for pawn changes no event announced; cheap (only flips a flag)
-        AddTimer(1.0f, () => _indicesDirty = true, TimerFlags.REPEAT);
+    public override void OnAllPluginsLoaded(bool hotReload)
+    {
+        if (!_loaded || _sharedApi is not null) return;
 
-        if (hotReload)
+        try
         {
-            Players.Clear();
-            foreach (var player in Utilities.GetPlayers())
-                if (player.IsValid && !player.IsBot)
-                    Players.Add(player);
-            _indicesDirty = true;
+            _sharedApi = _pluginCapability.Get();
         }
-    }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "CS2-SimpleAdmin SharedApi not found");
+            return;
+        }
 
-    /// <summary>
-    /// Controllers are recreated on a map change but no disconnect event is raised for the old ones; keeping them would
-    /// leave entries that point at freed entities. player_connect_full adds the new controllers again.
-    /// </summary>
-    private void OnMapStart(string mapName)
-    {
-        Players.Clear();
-        Array.Clear(_isTrackedRecipient);
-        _observerIndices = [];
-        _observerOwnerSlots = [];
-        _indicesDirty = true;
-    }
+        if (_sharedApi is null)
+        {
+            Logger.LogError("CS2-SimpleAdmin SharedApi not found");
+            return;
+        }
 
-    public override void Unload(bool hotReload)
-    {
-        RemoveListener<Listeners.CheckTransmit>(OnCheckTransmit);
-        RemoveListener<Listeners.OnMapStart>(OnMapStart);
-        if (_sharedApi != null && _subscribedToggleSilent)
-            _sharedApi.OnAdminToggleSilent -= OnAdminToggleSilent;
-        _subscribedToggleSilent = false;
-        _sharedApi = null;
-        Players.Clear();
+        _sharedApi.OnAdminToggleSilent += OnAdminToggleSilent;
+        try
+        {
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player.IsValid && !player.IsBot)
+                    Track(player);
+            }
+        }
+        catch (NativeException)
+        {
+            // CSS can load plugins before the first map creates the game globals.
+        }
+
+        ReadSilentSlots();
+        SyncTransmit();
     }
 
     public void OnConfigParsed(PluginConfig config)
     {
         Config = config;
+        _permissions = config.Permissions?.Where(permission => !string.IsNullOrWhiteSpace(permission))
+            .Select(permission => new[] { permission }).ToArray() ?? [];
+        if (_loaded) SyncStatusExclusions();
     }
 
-    public override void OnAllPluginsLoaded(bool hotReload)
+    public override void Unload(bool hotReload)
     {
-        try
-        {
-            _sharedApi = _pluginCapability.Get();
-            if (_sharedApi == null) throw new NullReferenceException("_sharedApi is null");
+        if (!_loaded) return;
+        _loaded = false;
+        if (_sharedApi is not null)
+            _sharedApi.OnAdminToggleSilent -= OnAdminToggleSilent;
+        _sharedApi = null;
+        ResetMap();
+        RemoveListener<Listeners.OnMapStart>(OnMapStart);
+        RemoveListener<Listeners.OnMapEnd>(OnMapEnd);
+        RemoveListener<Listeners.OnClientDisconnectPost>(OnClientDisconnectPost);
+        if (ReferenceEquals(_instance, this)) _instance = null;
+    }
 
-            if (Config.BlockStatusCommand)
-            {
-                _sharedApi.OnAdminToggleSilent += OnAdminToggleSilent;
-                _subscribedToggleSilent = true;
-            }
-        }
-        catch (Exception)
+    private void OnMapStart(string mapName)
+    {
+        ResetMap();
+        _mapEnding = false;
+        // The core clears its silent snapshot in its own map-start listener.
+        QueueSilentReconciliation();
+    }
+
+    private void OnMapEnd()
+    {
+        _mapEnding = true;
+        ResetMap();
+    }
+
+    private void ResetMap()
+    {
+        _mapGeneration++;
+        _reconcileQueued = false;
+        _silentSlots.Clear();
+        _disconnectedSilentSlots.Clear();
+        foreach (var slot in _statusExclusions)
+            Server.ExecuteCommand($"mm_removeexcludeslot {slot}");
+        _statusExclusions.Clear();
+        ClearPlayers();
+        SyncTransmit();
+    }
+
+    private void ClearPlayers()
+    {
+        Array.Fill(_controllerHandles, InvalidHandle);
+        Array.Fill(_deletedPawns, InvalidHandle);
+        Array.Clear(_recipients);
+        _playerCount = 0;
+    }
+
+    private void ReadSilentSlots()
+    {
+        _silentSlots.Clear();
+        if (_sharedApi is not { } api) return;
+        var snapshot = api.ListSilentAdminsSlots();
+        _disconnectedSilentSlots.IntersectWith(snapshot);
+        foreach (var slot in snapshot)
+            if (!_disconnectedSilentSlots.Contains(slot))
+                _silentSlots.Add(slot);
+        SyncStatusExclusions();
+    }
+
+    private void QueueSilentReconciliation()
+    {
+        if (!_loaded || _mapEnding || _sharedApi is null || _reconcileQueued) return;
+        _reconcileQueued = true;
+        var map = _mapGeneration;
+        Server.NextWorldUpdate(() =>
         {
-            Logger.LogError("CS2-SimpleAdmin SharedApi not found");
-            Unload(false);
-        }
+            if (!_loaded || map != _mapGeneration) return;
+            _reconcileQueued = false;
+            ReadSilentSlots();
+            SyncTransmit();
+        });
     }
 
     private void OnAdminToggleSilent(int slot, bool status)
     {
-        Server.ExecuteCommand(status ? $"mm_excludeslot {slot}" : $"mm_removeexcludeslot {slot}");
+        if (!_loaded || _mapEnding || (uint)slot >= MaxSlots) return;
+        // A manual toggle (including hide followed by unhide) supersedes pending auto-hide.
+        _joinGenerations[slot]++;
+        _disconnectedSilentSlots.Remove(slot);
+        ReadSilentSlots();
+        SyncTransmit();
     }
 
-    /// <summary>
-    /// Game thread. Rebuilds the observer-pawn index arrays from the tracked players (native reads happen here,
-    /// at most once per dirty period, never per CheckTransmit recipient).
-    /// </summary>
-    private void RebuildIndices()
+    private void SyncStatusExclusions()
     {
-        _indicesDirty = false;
-        var indices = new List<int>(Players.Count);
-        var owners = new List<int>(Players.Count);
-        Array.Clear(_isTrackedRecipient);
-        foreach (var p in Players)
+        for (var slot = 0; slot < MaxSlots; slot++)
+            SetStatusExclusion(slot, Config.BlockStatusCommand && _silentSlots.Contains(slot));
+    }
+
+    private void SetStatusExclusion(int slot, bool status)
+    {
+        if ((uint)slot >= MaxSlots) return;
+        if (status ? _statusExclusions.Add(slot) : _statusExclusions.Remove(slot))
+            Server.ExecuteCommand(status ? $"mm_excludeslot {slot}" : $"mm_removeexcludeslot {slot}");
+    }
+
+    private void SyncTransmit() =>
+        _subscription.Sync(_loaded && !_mapEnding && _sharedApi is not null && _slotOffset >= 0,
+            _playerCount, _silentSlots.Count);
+
+    private void SubscribeTransmit()
+    {
+        _refreshAll = true;
+        RegisterListener<Listeners.OnEntityDeleted>(_entityDeleted);
+        try
         {
-            if (!p.IsValid) continue; // before touching the pawn handle
-            if ((uint)p.Slot < MaxSlots && !p.IsHLTV) _isTrackedRecipient[p.Slot] = true;
-            var observer = p.ObserverPawn.Value;
-            if (observer is not { IsValid: true }) continue;
-            indices.Add((int)observer.Index);
-            owners.Add(p.Slot);
+            RegisterListener<Listeners.CheckTransmit>(_checkTransmit);
+        }
+        catch
+        {
+            RemoveListener<Listeners.OnEntityDeleted>(_entityDeleted);
+            throw;
+        }
+    }
+
+    private void UnsubscribeTransmit()
+    {
+        RemoveListener<Listeners.CheckTransmit>(_checkTransmit);
+        RemoveListener<Listeners.OnEntityDeleted>(_entityDeleted);
+        _targets.Reset();
+        Array.Clear(_dirty);
+        _dirtyCount = 0;
+        _refreshAll = false;
+        _nextRefresh = 0;
+    }
+
+    private void Track(CCSPlayerController player)
+    {
+        var slot = player.Slot;
+        if ((uint)slot >= MaxSlots) return;
+        var handle = player.EntityHandle.Raw;
+        if (_controllerHandles[slot] != handle)
+        {
+            if (_controllerHandles[slot] == InvalidHandle) _playerCount++;
+            _controllerHandles[slot] = handle;
+            _joinGenerations[slot]++;
+            _deletedPawns[slot] = InvalidHandle;
+            _targets.Remove(slot);
         }
 
-        _observerIndices = indices.ToArray();
-        _observerOwnerSlots = owners.ToArray();
+        _recipients[slot] = !player.IsHLTV;
+        MarkDirty(slot);
     }
 
-    /// <summary>
-    /// Hides the observer pawns of tracked players from every other tracked recipient while at least one admin is
-    /// silent (same semantics as before). Steady state: no LINQ, no anonymous objects, no allocations and no
-    /// native entity lookups – only bit operations on the transmit sets.
-    /// </summary>
+    private bool Untrack(int slot, uint handle)
+    {
+        if ((uint)slot >= MaxSlots || _controllerHandles[slot] != handle) return false;
+        _controllerHandles[slot] = InvalidHandle;
+        _recipients[slot] = false;
+        _deletedPawns[slot] = InvalidHandle;
+        _joinGenerations[slot]++;
+        _playerCount--;
+        _targets.Remove(slot);
+        return true;
+    }
+
+    internal static IEnumerable<CCSPlayerController> GetTrackedPlayers()
+    {
+        if (_instance is not { } instance) yield break;
+        for (var slot = 0; slot < MaxSlots; slot++)
+            if (instance.ResolvePlayer(slot) is { } player)
+                yield return player;
+    }
+
+    private CCSPlayerController? ResolvePlayer(int slot)
+    {
+        var handle = _controllerHandles[slot];
+        if (handle == InvalidHandle) return null;
+        var player = Utilities.GetPlayerFromSlot(slot);
+        return player is { IsValid: true } && player.EntityHandle.Raw == handle ? player : null;
+    }
+
+    private void MarkDirty(int slot)
+    {
+        if (!_subscription.Active || _refreshAll || (uint)slot >= MaxSlots || _dirty[slot] ||
+            _controllerHandles[slot] == InvalidHandle)
+            return;
+        _dirty[slot] = true;
+        _dirtySlots[_dirtyCount++] = slot;
+    }
+
+    private void RefreshSlot(int slot)
+    {
+        var observerHandle = ResolvePlayer(slot)?.ObserverPawn;
+        if (observerHandle is not null && observerHandle.Raw != _deletedPawns[slot] &&
+            observerHandle.Value is { IsValid: true } observer && observer.EntityHandle.Raw == observerHandle.Raw)
+        {
+            var index = observer.Index;
+            if (index > 0 && index < _maxEdicts)
+            {
+                _targets.Set(slot, (int)index, observerHandle.Raw);
+                return;
+            }
+        }
+
+        _targets.Remove(slot);
+    }
+
+    private void OnEntityDeleted(CEntityInstance entity)
+    {
+        if (_targets.Count == 0) return;
+        var handle = entity.EntityHandle;
+        if (!_targets.ContainsIndex((int)handle.Index)) return;
+
+        var raw = handle.Raw;
+        for (var slot = 0; slot < MaxSlots; slot++)
+        {
+            if (!_targets.RemoveDeleted(slot, raw)) continue;
+            _deletedPawns[slot] = raw;
+            MarkDirty(slot);
+        }
+    }
+
     private void OnCheckTransmit(CCheckTransmitInfoList infolist)
     {
-        var api = _sharedApi;
-        if (api == null || Players.Count <= 2) return;
-        if (api.ListSilentAdminsSlots().Count == 0) return; // snapshot set from the core plugin: no copy per call
-
-        if (_indicesDirty) RebuildIndices();
-        var indices = _observerIndices;
-        if (indices.Length == 0) return;
-        var owners = _observerOwnerSlots;
-
-        if (_slotOffset >= 0)
+        var now = Stopwatch.GetTimestamp();
+        if (_refreshAll || now >= _nextRefresh)
         {
-            FastPath(infolist, indices, owners);
-            return;
+            for (var slot = 0; slot < MaxSlots; slot++)
+                RefreshSlot(slot);
+            Array.Clear(_dirty);
+            _refreshAll = false;
+            _nextRefresh = now + Stopwatch.Frequency;
+        }
+        else
+        {
+            for (var i = 0; i < _dirtyCount; i++)
+            {
+                var slot = _dirtySlots[i];
+                _dirty[slot] = false;
+                RefreshSlot(slot);
+            }
         }
 
-        // Fallback: CSS indexer (allocates a controller wrapper per recipient)
-        for (var i = 0; i < infolist.Count; i++)
+        _dirtyCount = 0;
+        if (_targets.Count == 0) return;
+        if (_useCssIndexer)
+            ApplyUsingCssIndexer(infolist);
+        else
+            ApplyNative(infolist.Handle, _slotOffset, _recipients, _targets);
+    }
+
+    internal static bool IsNativeRecipient(bool[] recipients, int slot) =>
+        (uint)slot < (uint)recipients.Length && recipients[slot];
+
+    internal static bool IsIndexerRecipient(bool hasPlayer, bool isHltv) => hasPlayer && !isHltv;
+
+    private void ApplyUsingCssIndexer(CCheckTransmitInfoList infolist)
+    {
+        if (infolist.Handle == 0) return;
+        var count = infolist.Count;
+        if ((uint)count > MaxSlots) return;
+        for (var i = 0; i < count; i++)
         {
             var (info, player) = infolist[i];
-            if (player == null || player.IsHLTV) continue;
-            Hide(info.TransmitEntities, player.Slot, indices, owners);
+            if (IsIndexerRecipient(player is not null, player?.IsHLTV == true))
+                _targets.Hide(info.TransmitEntities, player!.Slot);
         }
     }
 
-    private unsafe void FastPath(CCheckTransmitInfoList infolist, int[] indices, int[] owners)
+    internal static unsafe void ApplyNative(nint list, int slotOffset, bool[] recipients, ObserverTargets targets)
     {
-        // Layout as read by CounterStrikeSharp 1.0.3xx CCheckTransmitInfoList: [0] = CCheckTransmitInfo**, [1] = count
-        var inner = (nint*)infolist.Handle;
-        var count = (int)*(inner + 1);
-        var infos = *(nint**)inner;
-        // A layout that no longer matches CounterStrikeSharp's would show up as garbage here: do nothing rather than walk it
+        // CSS x64 list layout: [CCheckTransmitInfo**, count]. Borrowed pointers are valid only in this callback.
+        var inner = (nint*)list;
+        if (inner == null) return;
+        var count = (int)inner[1];
+        var infos = (nint*)inner[0];
         if (infos == null || (uint)count > MaxSlots) return;
         for (var i = 0; i < count; i++)
         {
-            var infoPtr = *(infos + i);
-            if (infoPtr == 0) continue;
-            var slot = *(int*)((byte*)infoPtr + _slotOffset);
-            if ((uint)slot >= MaxSlots || !_isTrackedRecipient[slot]) continue; // HLTV / untracked (was: null or IsHLTV)
-            var info = *(CCheckTransmitInfo*)infoPtr;
-            Hide(info.TransmitEntities, slot, indices, owners);
-        }
-    }
-
-    private static void Hide(CFixedBitVecBase entities, int recipientSlot, int[] indices, int[] owners)
-    {
-        for (var j = 0; j < indices.Length; j++)
-        {
-            if (owners[j] == recipientSlot) continue;
-            entities.Remove(indices[j]); // clearing an unset bit is a no-op, no Contains needed
+            var info = (byte*)infos[i];
+            if (info == null) continue;
+            var slot = *(int*)(info + slotOffset);
+            if (IsNativeRecipient(recipients, slot))
+                targets.Hide(((CCheckTransmitInfo*)info)->TransmitEntities, slot);
         }
     }
 
     [GameEventHandler(HookMode.Pre)]
     public HookResult EventPlayerTeam(EventPlayerTeam @event, GameEventInfo info)
     {
-        _indicesDirty = true;
-        if (ShouldSuppressBroadcast(@event.Userid))
+        var player = @event.Userid;
+        if (player is not { IsValid: true } || player.IsBot) return HookResult.Continue;
+        if (_subscription.Active)
+            MarkDirty(player.Slot);
+        if (ShouldSuppressBroadcast(player))
             info.DontBroadcast = true;
-
         return HookResult.Continue;
     }
 
     [GameEventHandler]
     public HookResult EventPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
     {
-        _indicesDirty = true;
+        if (_subscription.Active && @event.Userid is { IsValid: true } player)
+            MarkDirty(player.Slot);
         return HookResult.Continue;
     }
 
     [GameEventHandler]
     public HookResult EventRoundStart(EventRoundStart @event, GameEventInfo info)
     {
-        _indicesDirty = true;
+        if (_subscription.Active)
+            _refreshAll = true;
         return HookResult.Continue;
     }
 
@@ -227,71 +447,93 @@ public class CS2_SimpleAdmin_StealthModule: BasePlugin, IPluginConfig<PluginConf
     public HookResult EventPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
         var player = @event.Userid;
-        if (player?.IsValid != true || player.IsBot) return HookResult.Continue;
+        if (player is not { IsValid: true } || player.IsBot || _mapEnding) return HookResult.Continue;
 
-        Players.Add(player);
-        _indicesDirty = true;
+        var slot = player.Slot;
+        if ((uint)slot >= MaxSlots) return HookResult.Continue;
+        Track(player);
+        SyncTransmit();
 
-        var steamId = new SteamID(player.SteamID);
-        if (!Config.Permissions.Any(permission => AdminManager.PlayerHasPermissions(steamId, permission)))
+        if (!Config.HideAdminsOnJoin)
             return HookResult.Continue;
 
-        if (!Config.HideAdminsOnJoin) return HookResult.Continue;
-
-        AddTimer(0.75f, () =>
-        {
-            if (player.IsValid) player.ChangeTeam(CsTeam.Spectator);
-        });
-
-        AddTimer(1.25f, () =>
-        {
-            if (player.IsValid) player.ExecuteClientCommandFromServer("css_hide");
-        });
-
+        var map = _mapGeneration;
+        var generation = _joinGenerations[slot];
+        // css_hide checks command permissions/overrides and performs the team transition itself.
+        AddTimer(1.25f, () => ResolveJoinPlayer(slot, map, generation)?.ExecuteClientCommandFromServer("css_hide"),
+            TimerFlags.STOP_ON_MAPCHANGE);
         return HookResult.Continue;
+    }
+
+    private CCSPlayerController? ResolveJoinPlayer(int slot, int map, int generation)
+    {
+        if (!_loaded || !Config.HideAdminsOnJoin || _mapGeneration != map || _joinGenerations[slot] != generation ||
+            _sharedApi is not { } api || ResolvePlayer(slot) is not { } player || api.IsAdminSilent(player))
+            return null;
+        return HasConfiguredPermission(player) ? player : null;
     }
 
     [GameEventHandler(HookMode.Pre)]
     public HookResult EventPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
         var player = @event.Userid;
-        if (player?.IsValid != true || player.IsBot) return HookResult.Continue;
+        if (player is not { IsValid: true } || player.IsBot) return HookResult.Continue;
 
-        if (Config.BlockStatusCommand && _sharedApi != null && _sharedApi.IsAdminSilent(player))
-            Server.ExecuteCommand($"mm_removeexcludeslot {player.Slot}");
+        var slot = player.Slot;
+        var silent = _sharedApi?.IsAdminSilent(player) == true;
+        if (silent || HasConfiguredPermission(player))
+            info.DontBroadcast = true;
 
-        Players.Remove(player);
-        _indicesDirty = true;
-
-        if (ShouldSuppressBroadcast(@event.Userid))
-                info.DontBroadcast = true;
+        var tracked = Untrack(slot, player.EntityHandle.Raw);
+        if (tracked || silent)
+            FinishDisconnect(slot);
 
         return HookResult.Continue;
+    }
+
+    private void OnClientDisconnectPost(int slot)
+    {
+        // Some disconnect events have no usable controller. The native callback still carries the slot.
+        if ((uint)slot >= MaxSlots) return;
+        var handle = _controllerHandles[slot];
+        if ((handle != InvalidHandle && Untrack(slot, handle)) || _silentSlots.Contains(slot))
+            FinishDisconnect(slot);
+    }
+
+    private void FinishDisconnect(int slot)
+    {
+        SetStatusExclusion(slot, false);
+        if (_silentSlots.Remove(slot))
+        {
+            // Older cores can retain this slot if player_disconnect has no controller.
+            _disconnectedSilentSlots.Add(slot);
+            QueueSilentReconciliation();
+        }
+        SyncTransmit();
     }
 
     [GameEventHandler(HookMode.Pre)]
     public HookResult EventPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
     {
-        if (ShouldSuppressBroadcast(@event.Userid, true))
+        var player = @event.Userid;
+        if (player is not { IsValid: true } || player.IsBot) return HookResult.Continue;
+        if (_subscription.Active)
+            MarkDirty(player.Slot);
+        if (ShouldSuppressBroadcast(player, checkTeam: true))
             info.DontBroadcast = true;
-
         return HookResult.Continue;
     }
 
-    private bool ShouldSuppressBroadcast(CCSPlayerController? player, bool checkTeam = false)
+    private bool ShouldSuppressBroadcast(CCSPlayerController player, bool checkTeam = false) =>
+        _sharedApi?.IsAdminSilent(player) == true ||
+        ((!checkTeam || player.TeamNum <= 1) && HasConfiguredPermission(player));
+
+    private bool HasConfiguredPermission(CCSPlayerController player)
     {
-        if (player?.IsValid != true || player.IsBot)
-            return false;
-
-        if (_sharedApi is not null && _sharedApi.IsAdminSilent(player))
-        {
-            return true;
-        }
-
-        if (checkTeam && player.TeamNum > 1)
-            return false;
-
-        var steamId = new SteamID(player.SteamID);
-        return Config.Permissions.Any(permission => AdminManager.PlayerHasPermissions(steamId, permission));
+        if (_permissions.Length == 0 || player.AuthorizedSteamID is not { } steamId) return false;
+        foreach (var flags in _permissions)
+            if (AdminManager.PlayerHasPermissions(steamId, flags))
+                return true;
+        return false;
     }
 }
